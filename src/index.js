@@ -10,6 +10,7 @@ const progressRoutes = require('./routes/progressRoutes');
 const ticketRoutes = require('./routes/ticketRoutes');
 const userRoutes = require('./routes/userRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
+const achievementRoutes = require('./routes/achievementRoutes');
 
 const app = express();
 
@@ -29,6 +30,7 @@ app.use('/api/progress', progressRoutes);
 app.use('/api/tickets', ticketRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/achievements', achievementRoutes);
 
 
 const PORT = process.env.PORT || 5000;
