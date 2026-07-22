@@ -164,11 +164,19 @@ const generateWorkoutPlan = async (req, res) => {
 
     const { workout_plan } = mlResponse.data.data;
 
+    // Helper: format Date object as YYYY-MM-DD using LOCAL date parts (hindi UTC/toISOString)
+    const formatLocalDate = (d) => {
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
+
     const today = new Date();
     const dayOfWeek = today.getDay();
-    const monday = new Date(today);
-    monday.setDate(today.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
-    const weekStart = monday.toISOString().split('T')[0];
+    const monday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    monday.setDate(monday.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
+    const weekStart = formatLocalDate(monday);
 
     // Clear existing workout plan for this user (same mode)
     await pool.query(
@@ -179,9 +187,6 @@ const generateWorkoutPlan = async (req, res) => {
     // Save new workout plan
     for (const day of workout_plan) {
       if (day.is_rest) continue;
-
-      const planDate = new Date(monday);
-      planDate.setDate(monday.getDate() + (day.day_number - 1));
 
       for (const exercise of day.exercises) {
         await pool.query(
@@ -215,11 +220,19 @@ const getMyWorkoutPlan = async (req, res) => {
   try {
     const userId = req.userId;
 
+    // Helper: format Date object as YYYY-MM-DD using LOCAL date parts (hindi UTC/toISOString)
+    const formatLocalDate = (d) => {
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
+
     const today = new Date();
     const dayOfWeek = today.getDay();
-    const monday = new Date(today);
-    monday.setDate(today.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
-    const weekStart = monday.toISOString().split('T')[0];
+    const monday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    monday.setDate(monday.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
+    const weekStart = formatLocalDate(monday);
 
     const result = await pool.query(
       `SELECT wp.id, wp.day, wp.sets, wp.reps, wp.done,

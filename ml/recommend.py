@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.metrics.pairwise import euclidean_distances
 import psycopg2
 import os
 from dotenv import load_dotenv
@@ -40,7 +40,6 @@ def get_meals_from_db():
     return meals
 
 def calculate_tdee(weight, height, age, sex, activity_level):
-    # Mifflin-St Jeor Formula
     if sex == 'Male':
         bmr = (10 * weight) + (6.25 * height) - (5 * age) + 5
     else:
@@ -56,10 +55,10 @@ def calculate_tdee(weight, height, age, sex, activity_level):
 
 def calculate_target_calories(tdee, dietary_goal):
     if dietary_goal == 'Cutting':
-        return round(tdee * 0.80)  # -20% deficit
+        return round(tdee * 0.80)
     elif dietary_goal == 'Bulking':
-        return round(tdee * 1.15)  # +15% surplus
-    else:  # Maintenance
+        return round(tdee * 1.15)
+    else:
         return tdee
 
 def calculate_macro_targets(target_calories, dietary_goal):
@@ -71,21 +70,20 @@ def calculate_macro_targets(target_calories, dietary_goal):
         protein_pct = 0.30
         carbs_pct = 0.45
         fats_pct = 0.25
-    else:  # Maintenance
+    else:
         protein_pct = 0.35
         carbs_pct = 0.40
         fats_pct = 0.25
 
     return {
-        'protein': round((target_calories * protein_pct) / 4),  # 4 cal per gram
+        'protein': round((target_calories * protein_pct) / 4),
         'carbs': round((target_calories * carbs_pct) / 4),
-        'fats': round((target_calories * fats_pct) / 9),        # 9 cal per gram
+        'fats': round((target_calories * fats_pct) / 9),
     }
 
 def filter_allergens(meals, user_allergens):
     if not user_allergens:
         return meals
-    
     safe_meals = []
     for meal in meals:
         meal_allergens = meal['allergens'] if meal['allergens'] else []
@@ -95,10 +93,8 @@ def filter_allergens(meals, user_allergens):
     return safe_meals
 
 def recommend_meals(user_profile, mode='weekly'):
-    # Get meals from database
     all_meals = get_meals_from_db()
-    
-    # Calculate TDEE and targets
+
     tdee = calculate_tdee(
         weight=user_profile['weight'],
         height=user_profile['height'],
@@ -106,113 +102,110 @@ def recommend_meals(user_profile, mode='weekly'):
         sex=user_profile['sex'],
         activity_level=user_profile['activity_level']
     )
-    
+
     target_calories = calculate_target_calories(tdee, user_profile['dietary_goal'])
     macro_targets = calculate_macro_targets(target_calories, user_profile['dietary_goal'])
-    
-    # Per meal targets (3 meals per day)
-    meal_calorie_target = target_calories / 3
-    meal_protein_target = macro_targets['protein'] / 3
-    meal_carbs_target = macro_targets['carbs'] / 3
-    meal_fats_target = macro_targets['fats'] / 3
-    
-    # Filter allergens
+
     safe_meals = filter_allergens(all_meals, user_profile.get('allergens', []))
-    
     if not safe_meals:
-        safe_meals = all_meals  # fallback if no safe meals
-    
-    # Separate by meal type
+        safe_meals = all_meals
+
     breakfast_meals = [m for m in safe_meals if m['meal_type'] == 'Breakfast']
     lunch_meals = [m for m in safe_meals if m['meal_type'] == 'Lunch']
     dinner_meals = [m for m in safe_meals if m['meal_type'] == 'Dinner']
-    
-    # Train scaler on all meals
+
     features = ['calories', 'protein', 'carbs', 'fats']
     all_df = pd.DataFrame(safe_meals)
-    
+
     if len(all_df) == 0:
-        return []
-    
+        return {
+            'meal_plan': [],
+            'tdee': tdee,
+            'target_calories': target_calories,
+            'macro_targets': macro_targets,
+            'mode': mode,
+            'days': 0
+        }
+
     scaler = MinMaxScaler()
     scaler.fit(all_df[features])
-    
+
     def get_best_meal(meal_list, calorie_target, protein_target, carbs_target, fats_target, used_ids):
         if not meal_list:
             return None
-        
-        # Filter out recently used meals
+
         available = [m for m in meal_list if m['id'] not in used_ids]
         if len(available) < 2:
-            used_ids.clear()  # reset used ids
+            used_ids.clear()
             available = meal_list
-        
+
         df = pd.DataFrame(available)
-        
-        # User target vector
-        user_vector = pd.DataFrame([[calorie_target, protein_target, carbs_target, fats_target]], 
+
+        user_vector = pd.DataFrame([[calorie_target, protein_target, carbs_target, fats_target]],
                                    columns=features)
-        
-        # Scale
+
         meal_scaled = scaler.transform(df[features])
         user_scaled = scaler.transform(user_vector)
-        
-        # Compute cosine similarity
-        scores = cosine_similarity(user_scaled, meal_scaled)[0]
+
+        distances = euclidean_distances(user_scaled, meal_scaled)[0]
         df = df.copy()
-        df['score'] = scores
-        
-        # Get best meal
+        df['score'] = -distances
+
         best = df.nlargest(1, 'score').iloc[0]
         return best.to_dict()
-    
-    # Generate meal plan
-    days = 7 if mode == 'weekly' else 30
-    day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 
+
+    days_to_generate = 7 if mode == 'weekly' else 30
+    day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday',
                  'Friday', 'Saturday', 'Sunday']
-    
+
+    meal_split = {
+        'breakfast': 0.30,
+        'lunch': 0.40,
+        'dinner': 0.30,
+    }
+
     meal_plan = []
     used_breakfast_ids = set()
     used_lunch_ids = set()
     used_dinner_ids = set()
-    
-    for i in range(days):
+
+    for i in range(days_to_generate):
         day_name = day_names[i % 7]
-        
+
         breakfast = get_best_meal(
-            breakfast_meals, 
-            meal_calorie_target * 0.30,  # 30% of daily calories
-            meal_protein_target,
-            meal_carbs_target,
-            meal_fats_target,
+            breakfast_meals,
+            target_calories * meal_split['breakfast'],
+            macro_targets['protein'] * meal_split['breakfast'],
+            macro_targets['carbs'] * meal_split['breakfast'],
+            macro_targets['fats'] * meal_split['breakfast'],
             used_breakfast_ids
         )
-        
+
         lunch = get_best_meal(
             lunch_meals,
-            meal_calorie_target * 0.40,  # 40% of daily calories
-            meal_protein_target,
-            meal_carbs_target,
-            meal_fats_target,
+            target_calories * meal_split['lunch'],
+            macro_targets['protein'] * meal_split['lunch'],
+            macro_targets['carbs'] * meal_split['lunch'],
+            macro_targets['fats'] * meal_split['lunch'],
             used_lunch_ids
         )
-        
+
         dinner = get_best_meal(
             dinner_meals,
-            meal_calorie_target * 0.30,  # 30% of daily calories
-            meal_protein_target,
-            meal_carbs_target,
-            meal_fats_target,
+            target_calories * meal_split['dinner'],
+            macro_targets['protein'] * meal_split['dinner'],
+            macro_targets['carbs'] * meal_split['dinner'],
+            macro_targets['fats'] * meal_split['dinner'],
             used_dinner_ids
         )
-        
+
         if breakfast:
             used_breakfast_ids.add(breakfast['id'])
         if lunch:
             used_lunch_ids.add(lunch['id'])
         if dinner:
             used_dinner_ids.add(dinner['id'])
-        
+
         meal_plan.append({
             'day': day_name,
             'day_number': i + 1,
@@ -220,14 +213,14 @@ def recommend_meals(user_profile, mode='weekly'):
             'lunch': lunch,
             'dinner': dinner,
         })
-    
+
     return {
         'meal_plan': meal_plan,
         'tdee': tdee,
         'target_calories': target_calories,
         'macro_targets': macro_targets,
         'mode': mode,
-        'days': days
+        'days': days_to_generate
     }
 def get_exercises_from_db():
     conn = get_db_connection()
@@ -259,10 +252,6 @@ def get_difficulty_score(difficulty):
 
 
 def get_workout_split(mode='weekly'):
-    """
-    Weekly split: 5 workout days + 2 rest days
-    Continuous mode uses the same 7-day rotating split
-    """
     return [
         {'day': 'Monday', 'focus': 'Chest + Core', 'muscle_groups': ['Chest', 'Core'], 'is_rest': False},
         {'day': 'Tuesday', 'focus': 'Legs + Glutes', 'muscle_groups': ['Legs', 'Glutes', 'Calves'], 'is_rest': False},
@@ -275,26 +264,16 @@ def get_workout_split(mode='weekly'):
 
 
 def filter_by_experience(exercises, experience_level):
-    """
-    Beginner users -> Beginner + some Intermediate exercises
-    Intermediate users -> Beginner + Intermediate + some Advanced
-    Advanced users -> all difficulty levels
-    """
     max_score = {
-        'Beginner': 2,      # Beginner + Intermediate
-        'Intermediate': 3,  # all levels
-        'Advanced': 3,      # all levels
+        'Beginner': 2,
+        'Intermediate': 3,
+        'Advanced': 3,
     }
     limit = max_score.get(experience_level, 2)
-
     return [e for e in exercises if get_difficulty_score(e['difficulty']) <= limit]
 
 
 def filter_by_equipment(exercises, available_equipment):
-    """
-    available_equipment: list like ['Bodyweight', 'Dumbbell'] for home workout users
-    If None or empty, all equipment types are allowed
-    """
     if not available_equipment:
         return exercises
     return [e for e in exercises if e['equipment'] in available_equipment]
@@ -304,20 +283,19 @@ def recommend_workout(user_profile, mode='weekly'):
     all_exercises = get_exercises_from_db()
 
     experience_level = user_profile.get('experience_level', 'Beginner')
-    available_equipment = user_profile.get('available_equipment', [])  # e.g. ['Bodyweight', 'Dumbbell']
+    available_equipment = user_profile.get('available_equipment', [])
 
-    # Filter by experience and equipment
     filtered = filter_by_experience(all_exercises, experience_level)
     filtered = filter_by_equipment(filtered, available_equipment)
 
     if not filtered:
-        filtered = all_exercises  # fallback
+        filtered = all_exercises
 
     split = get_workout_split(mode)
     days_to_generate = 7 if mode == 'weekly' else 30
 
     workout_plan = []
-    used_exercise_ids = {}  # track used exercises per muscle group to reduce repeats
+    used_exercise_ids = {}
 
     for i in range(days_to_generate):
         day_template = split[i % 7]
@@ -346,14 +324,12 @@ def recommend_workout(user_profile, mode='weekly'):
                 used_exercise_ids[muscle_group] = set()
                 available = group_exercises
 
-            # Pick up to 2-3 exercises per muscle group
             num_to_pick = min(3, len(available))
             picked = available[:num_to_pick]
 
             for ex in picked:
                 used_exercise_ids.setdefault(muscle_group, set()).add(ex['id'])
 
-                # Assign sets/reps based on difficulty
                 if ex['difficulty'] == 'Beginner':
                     sets, reps = 3, '12 reps'
                 elif ex['difficulty'] == 'Intermediate':

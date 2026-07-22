@@ -202,12 +202,20 @@ const generateMealPlan = async (req, res) => {
     });
 
     const { meal_plan, tdee, target_calories, macro_targets } = mlResponse.data.data;
+ 
+    // Helper: format Date object as YYYY-MM-DD using LOCAL date parts (hindi UTC/toISOString)
+    const formatLocalDate = (d) => {
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
 
-    // Calculate week_start (Monday of current week)
+    // Calculate week_start (Monday of current week) gamit local date parts
     const dayOfWeek = today.getDay();
-    const monday = new Date(today);
-    monday.setDate(today.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
-    const weekStart = monday.toISOString().split('T')[0];
+    const monday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    monday.setDate(monday.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
+    const weekStart = formatLocalDate(monday);
 
     // Clear existing meal plan for this user (same mode)
     await pool.query(
@@ -228,14 +236,13 @@ const generateMealPlan = async (req, res) => {
       for (const slot of mealSlots) {
         if (!slot.meal) continue;
 
-        const planDate = new Date(monday);
-        planDate.setDate(monday.getDate() + (day.day_number - 1));
+        const planDate = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + (day.day_number - 1));
 
         await pool.query(
           `INSERT INTO meal_plans (
             user_id, meal_id, day, meal_type, week_start, mode, plan_date, taken
           ) VALUES ($1, $2, $3, $4, $5, $6, $7, false)`,
-          [userId, slot.meal.id, day.day, slot.type, weekStart, mode || 'weekly', planDate.toISOString().split('T')[0]]
+          [userId, slot.meal.id, day.day, slot.type, weekStart, mode || 'weekly', formatLocalDate(planDate)]
         );
       }
     }

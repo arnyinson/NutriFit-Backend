@@ -4,7 +4,7 @@ const testWorkoutAPI = async () => {
   try {
     console.log('--- Logging in ---');
     const loginRes = await axios.post('http://localhost:5000/api/auth/login', {
-      username: 'juandelacruz',
+      username: 'arny',
       password: 'password123'
     });
     const token = loginRes.data.token;
