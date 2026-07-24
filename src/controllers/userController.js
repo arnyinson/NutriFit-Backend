@@ -42,7 +42,7 @@ const getMyProfile = async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT id, name, email, username, birthday, sex, height, weight,
-              dietary_goal, activity_level, allergens, bmi, tdee, is_active, created_at
+              dietary_goal, activity_level, allergens, bmi, tdee, is_active, avatar_url, created_at
        FROM users WHERE id = $1`,
       [req.userId]
     );
@@ -98,7 +98,7 @@ const updateMyProfile = async (req, res) => {
         updated_at = now()
       WHERE id = $11
       RETURNING id, name, email, username, birthday, sex, height, weight,
-                dietary_goal, activity_level, allergens, bmi, tdee`,
+                dietary_goal, activity_level, allergens, bmi, tdee, avatar_url`,
       [name, birthday, sex, height, weight, dietary_goal, activity_level, allergens, bmi, tdee, userId]
     );
 
@@ -159,7 +159,7 @@ const getAllUsers = async (req, res) => {
 
     let query = `
       SELECT id, name, email, username, birthday, sex, height, weight,
-             dietary_goal, activity_level, allergens, bmi, tdee, is_active, created_at
+             dietary_goal, activity_level, allergens, bmi, tdee, is_active, avatar_url, created_at
       FROM users WHERE 1=1
     `;
     const params = [];
@@ -239,33 +239,33 @@ const getDashboardStats = async (req, res) => {
     `);
 
     const recentUsers = await pool.query(`
-  SELECT name, email, dietary_goal, is_active, birthday
-  FROM users ORDER BY created_at DESC LIMIT 5
-`);
+      SELECT name, email, dietary_goal, is_active, birthday
+      FROM users ORDER BY created_at DESC LIMIT 5
+    `);
 
-// Compute age in JS instead of SQL (safer across DB engines)
-const recentUsersWithAge = recentUsers.rows.map(u => {
-  const today = new Date();
-  const birthDate = new Date(u.birthday);
-  let age = today.getFullYear() - birthDate.getFullYear();
-  const monthDiff = today.getMonth() - birthDate.getMonth();
-  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
-    age--;
-  }
-  return { ...u, age };
-});
+    // Compute age in JS instead of SQL (safer across DB engines)
+    const recentUsersWithAge = recentUsers.rows.map(u => {
+      const today = new Date();
+      const birthDate = new Date(u.birthday);
+      let age = today.getFullYear() - birthDate.getFullYear();
+      const monthDiff = today.getMonth() - birthDate.getMonth();
+      if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+        age--;
+      }
+      return { ...u, age };
+    });
 
     res.json({
-  success: true,
-  stats: {
-    totalUsers: totalUsers.rows[0].count,
-    activeMealPlans: activeMealPlans.rows[0].count,
-    weeklyReports: weeklyReports.rows[0].count,
-    allergyCases: allergyCases.rows[0].count,
-  },
-  goalDistribution: goalDistribution.rows,
-  recentUsers: recentUsersWithAge,
-});
+      success: true,
+      stats: {
+        totalUsers: totalUsers.rows[0].count,
+        activeMealPlans: activeMealPlans.rows[0].count,
+        weeklyReports: weeklyReports.rows[0].count,
+        allergyCases: allergyCases.rows[0].count,
+      },
+      goalDistribution: goalDistribution.rows,
+      recentUsers: recentUsersWithAge,
+    });
 
   } catch (err) {
     console.error('Get dashboard stats error:', err.message);
