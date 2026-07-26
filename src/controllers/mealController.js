@@ -178,10 +178,27 @@ const generateMealPlan = async (req, res) => {
       return res.status(404).json({ error: 'User not found.' });
     }
 
-    const user = userResult.rows[0];
+   const user = userResult.rows[0];
+
+    // Gamitin ang Philippine Time (UTC+8) bilang reference, hindi ang server's default timezone
+   const getPhilippineNow = () => {
+  const now = new Date();
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Manila',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const parts = formatter.formatToParts(now);
+  const year = parseInt(parts.find(p => p.type === 'year').value, 10);
+  const month = parseInt(parts.find(p => p.type === 'month').value, 10);
+  const day = parseInt(parts.find(p => p.type === 'day').value, 10);
+  // Gumawa ng Date object sa midnight, gamit ang eksaktong Y/M/D ng Manila
+  return new Date(year, month - 1, day);
+};
 
     // Calculate age
-    const today = new Date();
+    const today = getPhilippineNow();
     const birthDate = new Date(user.birthday);
     let age = today.getFullYear() - birthDate.getFullYear();
     const monthDiff = today.getMonth() - birthDate.getMonth();
@@ -212,10 +229,18 @@ const generateMealPlan = async (req, res) => {
     };
 
     // Calculate week_start (Monday of current week) gamit local date parts
-    const dayOfWeek = today.getDay();
-    const monday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    monday.setDate(monday.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
-    const weekStart = formatLocalDate(monday);
+console.log('DEBUG today:', today.toString());
+console.log('DEBUG today Y/M/D:', today.getFullYear(), today.getMonth() + 1, today.getDate());
+
+const dayOfWeek = today.getDay();
+console.log('DEBUG dayOfWeek:', dayOfWeek);
+
+const monday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+monday.setDate(monday.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
+console.log('DEBUG monday:', monday.toString());
+
+const weekStart = formatLocalDate(monday);
+console.log('DEBUG weekStart:', weekStart);
 
     // Clear existing meal plan for this user (same mode)
     await pool.query(
@@ -270,6 +295,15 @@ const getMyMealPlan = async (req, res) => {
     const userId = req.userId;
     const { mode } = req.query;
 
+    // Helper: i-format ang Date object gamit ang LOCAL date parts, hindi UTC
+    // (iniiwasan ang off-by-one bug ng pg DATE column parsing)
+    const formatLocalDate = (d) => {
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
+
     const result = await pool.query(
       `SELECT mp.id, mp.day, mp.meal_type, mp.plan_date, mp.taken, mp.skipped, mp.mode,
               m.id as meal_id, m.name, m.category, m.calories, m.protein, m.carbs, m.fats,
@@ -285,8 +319,7 @@ const getMyMealPlan = async (req, res) => {
     // Group by day
     const grouped = {};
     result.rows.forEach(row => {
-      const key = row.plan_date.toISOString().split('T')[0];
-      if (!grouped[key]) {
+    const key = formatLocalDate(row.plan_date);      if (!grouped[key]) {
         grouped[key] = { date: key, day: row.day, meals: [] };
       }
       grouped[key].meals.push({

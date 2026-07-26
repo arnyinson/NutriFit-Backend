@@ -172,8 +172,14 @@ const generateWorkoutPlan = async (req, res) => {
       return `${year}-${month}-${day}`;
     };
 
-    const today = new Date();
-    const dayOfWeek = today.getDay();
+ const getPhilippineNow = () => {
+  const now = new Date();
+  const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+  return new Date(utcMs + 8 * 60 * 60 * 1000);
+};
+const today = getPhilippineNow();
+const dayOfWeek = today.getDay();
+
     const monday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
     monday.setDate(monday.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
     const weekStart = formatLocalDate(monday);
@@ -228,11 +234,16 @@ const getMyWorkoutPlan = async (req, res) => {
       return `${year}-${month}-${day}`;
     };
 
-    const today = new Date();
-    const dayOfWeek = today.getDay();
-    const monday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    monday.setDate(monday.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
-    const weekStart = formatLocalDate(monday);
+      const getPhilippineNow = () => {
+      const now = new Date();
+      const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+      return new Date(utcMs + 8 * 60 * 60 * 1000);
+    };
+      const today = getPhilippineNow();
+      const dayOfWeek = today.getDay();
+      const monday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      monday.setDate(monday.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
+      const weekStart = formatLocalDate(monday);
 
     const result = await pool.query(
       `SELECT wp.id, wp.day, wp.sets, wp.reps, wp.done,
