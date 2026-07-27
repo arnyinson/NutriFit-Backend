@@ -41,11 +41,9 @@ const getCurrentWeekMonday = () => {
 };
 
 // ============================================
-// SHARED: Generate + Save Meal Plan (ginagamit ng generateMealPlan endpoint
-// AT ng auto-regeneration logic sa loob ng getMyMealPlan)
+// SHARED: Generate + Save Meal Plan
 // ============================================
 const generateAndSaveMealPlan = async (userId, mode) => {
-  // Get user profile
   const userResult = await pool.query(
     `SELECT birthday, sex, height, weight, dietary_goal, activity_level, allergens
      FROM users WHERE id = $1`,
@@ -61,7 +59,6 @@ const generateAndSaveMealPlan = async (userId, mode) => {
   const user = userResult.rows[0];
   const { today, monday } = getCurrentWeekMonday();
 
-  // Calculate age
   const birthDate = new Date(user.birthday);
   let age = today.getFullYear() - birthDate.getFullYear();
   const monthDiff = today.getMonth() - birthDate.getMonth();
@@ -69,7 +66,6 @@ const generateAndSaveMealPlan = async (userId, mode) => {
     age--;
   }
 
-  // Call Python ML API
   const mlResponse = await axios.post(`${ML_API_URL}/recommend`, {
     weight: parseFloat(user.weight),
     height: parseFloat(user.height),
@@ -84,13 +80,11 @@ const generateAndSaveMealPlan = async (userId, mode) => {
   const { meal_plan, tdee, target_calories, macro_targets } = mlResponse.data.data;
   const weekStart = formatLocalDate(monday);
 
-  // Clear existing meal plan for this user (same mode)
   await pool.query(
     'DELETE FROM meal_plans WHERE user_id = $1 AND mode = $2',
     [userId, mode || 'weekly']
   );
 
-  // Save new meal plan to database
   for (const day of meal_plan) {
     if (day.is_rest) continue;
 
@@ -274,12 +268,12 @@ const deleteMeal = async (req, res) => {
 };
 
 // ============================================
-// GENERATE MEAL PLAN (endpoint - explicit na request mula sa user/app)
+// GENERATE MEAL PLAN (endpoint)
 // ============================================
 const generateMealPlan = async (req, res) => {
   try {
     const userId = req.userId;
-    const { mode } = req.body; // 'weekly' or 'continuous'
+    const { mode } = req.body;
 
     const data = await generateAndSaveMealPlan(userId, mode || 'weekly');
 
@@ -291,6 +285,8 @@ const generateMealPlan = async (req, res) => {
 
   } catch (err) {
     console.error('Generate meal plan error:', err.message);
+    console.error('ML API response data:', err.response?.data);
+    console.error('ML API status:', err.response?.status);
     if (err.statusCode === 404) {
       return res.status(404).json({ error: err.message });
     }
@@ -303,7 +299,6 @@ const generateMealPlan = async (req, res) => {
 
 // ============================================
 // GET USER'S CURRENT MEAL PLAN
-// (may auto-regeneration kung "luma" na ang existing plan)
 // ============================================
 const getMyMealPlan = async (req, res) => {
   try {
@@ -314,7 +309,6 @@ const getMyMealPlan = async (req, res) => {
     const currentWeekStart = formatLocalDate(monday);
     const todayStr = formatLocalDate(today);
 
-    // I-check kung may existing plan, at kung "luma" na ba ito
     const existingCheck = await pool.query(
       `SELECT week_start, MAX(plan_date) as max_plan_date
        FROM meal_plans WHERE user_id = $1 AND mode = $2
@@ -325,16 +319,13 @@ const getMyMealPlan = async (req, res) => {
     let needsRegeneration = false;
 
     if (existingCheck.rows.length === 0) {
-      // Walang laman talaga - kailangang i-generate
       needsRegeneration = true;
     } else if (mode === 'weekly') {
-      // Weekly mode: kailangang tumugma ang week_start sa kasalukuyang linggo
       const existingWeekStart = formatLocalDate(new Date(existingCheck.rows[0].week_start));
       if (existingWeekStart !== currentWeekStart) {
         needsRegeneration = true;
       }
     } else {
-      // Continuous mode: kailangang hindi pa nauubusan ng future dates
       const maxPlanDate = existingCheck.rows[0].max_plan_date;
       if (!maxPlanDate || formatLocalDate(new Date(maxPlanDate)) < todayStr) {
         needsRegeneration = true;
@@ -346,7 +337,7 @@ const getMyMealPlan = async (req, res) => {
         await generateAndSaveMealPlan(userId, mode);
       } catch (genErr) {
         console.error('Auto-regeneration error:', genErr.message);
-        // Kung mabigo ang auto-regen, ituloy pa rin at ipakita na lang ang meron (kung meron)
+        console.error('Auto-regeneration ML API response:', genErr.response?.data);
       }
     }
 
@@ -362,7 +353,6 @@ const getMyMealPlan = async (req, res) => {
       [userId, mode]
     );
 
-    // Group by day
     const grouped = {};
     result.rows.forEach(row => {
       const key = formatLocalDate(row.plan_date);
@@ -403,7 +393,7 @@ const getMyMealPlan = async (req, res) => {
 const toggleMealStatus = async (req, res) => {
   try {
     const { planId } = req.params;
-    const { taken } = req.body; // true or false
+    const { taken } = req.body;
 
     const result = await pool.query(
       `UPDATE meal_plans SET taken = $1, skipped = $2 WHERE id = $3
@@ -485,7 +475,7 @@ const logFood = async (req, res) => {
 const getFoodLogs = async (req, res) => {
   try {
     const userId = req.userId;
-    const { date } = req.query; // YYYY-MM-DD
+    const { date } = req.query;
 
     let query = 'SELECT * FROM food_logs WHERE user_id = $1';
     const params = [userId];
