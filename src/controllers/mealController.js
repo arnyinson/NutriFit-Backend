@@ -4,6 +4,120 @@ const axios = require('axios');
 const ML_API_URL = process.env.ML_API_URL || 'http://localhost:5001';
 
 // ============================================
+// SHARED DATE HELPERS
+// ============================================
+
+// Gamitin ang Philippine Time (UTC+8) bilang reference, hindi ang server's default timezone
+const getPhilippineNow = () => {
+  const now = new Date();
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Manila',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const parts = formatter.formatToParts(now);
+  const year = parseInt(parts.find(p => p.type === 'year').value, 10);
+  const month = parseInt(parts.find(p => p.type === 'month').value, 10);
+  const day = parseInt(parts.find(p => p.type === 'day').value, 10);
+  return new Date(year, month - 1, day);
+};
+
+// Helper: format Date object as YYYY-MM-DD using LOCAL date parts (hindi UTC/toISOString)
+const formatLocalDate = (d) => {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+// Kinukuha ang Monday ng kasalukuyang linggo (base sa Philippine Time)
+const getCurrentWeekMonday = () => {
+  const today = getPhilippineNow();
+  const dayOfWeek = today.getDay();
+  const monday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  monday.setDate(monday.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
+  return { today, monday };
+};
+
+// ============================================
+// SHARED: Generate + Save Meal Plan (ginagamit ng generateMealPlan endpoint
+// AT ng auto-regeneration logic sa loob ng getMyMealPlan)
+// ============================================
+const generateAndSaveMealPlan = async (userId, mode) => {
+  // Get user profile
+  const userResult = await pool.query(
+    `SELECT birthday, sex, height, weight, dietary_goal, activity_level, allergens
+     FROM users WHERE id = $1`,
+    [userId]
+  );
+
+  if (userResult.rows.length === 0) {
+    const error = new Error('User not found.');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const user = userResult.rows[0];
+  const { today, monday } = getCurrentWeekMonday();
+
+  // Calculate age
+  const birthDate = new Date(user.birthday);
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const monthDiff = today.getMonth() - birthDate.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+    age--;
+  }
+
+  // Call Python ML API
+  const mlResponse = await axios.post(`${ML_API_URL}/recommend`, {
+    weight: parseFloat(user.weight),
+    height: parseFloat(user.height),
+    age,
+    sex: user.sex,
+    activity_level: user.activity_level,
+    dietary_goal: user.dietary_goal,
+    allergens: user.allergens || [],
+    mode: mode || 'weekly',
+  });
+
+  const { meal_plan, tdee, target_calories, macro_targets } = mlResponse.data.data;
+  const weekStart = formatLocalDate(monday);
+
+  // Clear existing meal plan for this user (same mode)
+  await pool.query(
+    'DELETE FROM meal_plans WHERE user_id = $1 AND mode = $2',
+    [userId, mode || 'weekly']
+  );
+
+  // Save new meal plan to database
+  for (const day of meal_plan) {
+    if (day.is_rest) continue;
+
+    const mealSlots = [
+      { type: 'Breakfast', meal: day.breakfast },
+      { type: 'Lunch', meal: day.lunch },
+      { type: 'Dinner', meal: day.dinner },
+    ];
+
+    for (const slot of mealSlots) {
+      if (!slot.meal) continue;
+
+      const planDate = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + (day.day_number - 1));
+
+      await pool.query(
+        `INSERT INTO meal_plans (
+          user_id, meal_id, day, meal_type, week_start, mode, plan_date, taken
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, false)`,
+        [userId, slot.meal.id, day.day, slot.type, weekStart, mode || 'weekly', formatLocalDate(planDate)]
+      );
+    }
+  }
+
+  return { meal_plan, tdee, target_calories, macro_targets, mode: mode || 'weekly' };
+};
+
+// ============================================
 // GET ALL MEALS (for admin / meal database browsing)
 // ============================================
 const getAllMeals = async (req, res) => {
@@ -160,126 +274,26 @@ const deleteMeal = async (req, res) => {
 };
 
 // ============================================
-// GENERATE MEAL PLAN (calls Python ML API, then saves to DB)
+// GENERATE MEAL PLAN (endpoint - explicit na request mula sa user/app)
 // ============================================
 const generateMealPlan = async (req, res) => {
   try {
     const userId = req.userId;
     const { mode } = req.body; // 'weekly' or 'continuous'
 
-    // Get user profile
-    const userResult = await pool.query(
-      `SELECT birthday, sex, height, weight, dietary_goal, activity_level, allergens
-       FROM users WHERE id = $1`,
-      [userId]
-    );
-
-    if (userResult.rows.length === 0) {
-      return res.status(404).json({ error: 'User not found.' });
-    }
-
-   const user = userResult.rows[0];
-
-    // Gamitin ang Philippine Time (UTC+8) bilang reference, hindi ang server's default timezone
-   const getPhilippineNow = () => {
-  const now = new Date();
-  const formatter = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Manila',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  });
-  const parts = formatter.formatToParts(now);
-  const year = parseInt(parts.find(p => p.type === 'year').value, 10);
-  const month = parseInt(parts.find(p => p.type === 'month').value, 10);
-  const day = parseInt(parts.find(p => p.type === 'day').value, 10);
-  // Gumawa ng Date object sa midnight, gamit ang eksaktong Y/M/D ng Manila
-  return new Date(year, month - 1, day);
-};
-
-    // Calculate age
-    const today = getPhilippineNow();
-    const birthDate = new Date(user.birthday);
-    let age = today.getFullYear() - birthDate.getFullYear();
-    const monthDiff = today.getMonth() - birthDate.getMonth();
-    if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
-      age--;
-    }
-
-    // Call Python ML API
-    const mlResponse = await axios.post(`${ML_API_URL}/recommend`, {
-      weight: parseFloat(user.weight),
-      height: parseFloat(user.height),
-      age,
-      sex: user.sex,
-      activity_level: user.activity_level,
-      dietary_goal: user.dietary_goal,
-      allergens: user.allergens || [],
-      mode: mode || 'weekly',
-    });
-
-    const { meal_plan, tdee, target_calories, macro_targets } = mlResponse.data.data;
- 
-    // Helper: format Date object as YYYY-MM-DD using LOCAL date parts (hindi UTC/toISOString)
-    const formatLocalDate = (d) => {
-      const year = d.getFullYear();
-      const month = String(d.getMonth() + 1).padStart(2, '0');
-      const day = String(d.getDate()).padStart(2, '0');
-      return `${year}-${month}-${day}`;
-    };
-
-    // Calculate week_start (Monday of current week) gamit local date parts
-console.log('DEBUG today:', today.toString());
-console.log('DEBUG today Y/M/D:', today.getFullYear(), today.getMonth() + 1, today.getDate());
-
-const dayOfWeek = today.getDay();
-console.log('DEBUG dayOfWeek:', dayOfWeek);
-
-const monday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-monday.setDate(monday.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
-console.log('DEBUG monday:', monday.toString());
-
-const weekStart = formatLocalDate(monday);
-console.log('DEBUG weekStart:', weekStart);
-
-    // Clear existing meal plan for this user (same mode)
-    await pool.query(
-      'DELETE FROM meal_plans WHERE user_id = $1 AND mode = $2',
-      [userId, mode || 'weekly']
-    );
-
-    // Save new meal plan to database
-    for (const day of meal_plan) {
-      if (day.is_rest) continue; // no meals for rest-like days (shouldn't happen for meals, but safe check)
-
-      const mealSlots = [
-        { type: 'Breakfast', meal: day.breakfast },
-        { type: 'Lunch', meal: day.lunch },
-        { type: 'Dinner', meal: day.dinner },
-      ];
-
-      for (const slot of mealSlots) {
-        if (!slot.meal) continue;
-
-        const planDate = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + (day.day_number - 1));
-
-        await pool.query(
-          `INSERT INTO meal_plans (
-            user_id, meal_id, day, meal_type, week_start, mode, plan_date, taken
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, false)`,
-          [userId, slot.meal.id, day.day, slot.type, weekStart, mode || 'weekly', formatLocalDate(planDate)]
-        );
-      }
-    }
+    const data = await generateAndSaveMealPlan(userId, mode || 'weekly');
 
     res.json({
       success: true,
       message: 'Meal plan generated successfully!',
-      data: { meal_plan, tdee, target_calories, macro_targets, mode: mode || 'weekly' }
+      data,
     });
 
   } catch (err) {
     console.error('Generate meal plan error:', err.message);
+    if (err.statusCode === 404) {
+      return res.status(404).json({ error: err.message });
+    }
     if (err.code === 'ECONNREFUSED') {
       return res.status(503).json({ error: 'AI recommendation service is unavailable. Please try again later.' });
     }
@@ -289,20 +303,52 @@ console.log('DEBUG weekStart:', weekStart);
 
 // ============================================
 // GET USER'S CURRENT MEAL PLAN
+// (may auto-regeneration kung "luma" na ang existing plan)
 // ============================================
 const getMyMealPlan = async (req, res) => {
   try {
     const userId = req.userId;
-    const { mode } = req.query;
+    const mode = req.query.mode || 'weekly';
 
-    // Helper: i-format ang Date object gamit ang LOCAL date parts, hindi UTC
-    // (iniiwasan ang off-by-one bug ng pg DATE column parsing)
-    const formatLocalDate = (d) => {
-      const year = d.getFullYear();
-      const month = String(d.getMonth() + 1).padStart(2, '0');
-      const day = String(d.getDate()).padStart(2, '0');
-      return `${year}-${month}-${day}`;
-    };
+    const { today, monday } = getCurrentWeekMonday();
+    const currentWeekStart = formatLocalDate(monday);
+    const todayStr = formatLocalDate(today);
+
+    // I-check kung may existing plan, at kung "luma" na ba ito
+    const existingCheck = await pool.query(
+      `SELECT week_start, MAX(plan_date) as max_plan_date
+       FROM meal_plans WHERE user_id = $1 AND mode = $2
+       GROUP BY week_start`,
+      [userId, mode]
+    );
+
+    let needsRegeneration = false;
+
+    if (existingCheck.rows.length === 0) {
+      // Walang laman talaga - kailangang i-generate
+      needsRegeneration = true;
+    } else if (mode === 'weekly') {
+      // Weekly mode: kailangang tumugma ang week_start sa kasalukuyang linggo
+      const existingWeekStart = formatLocalDate(new Date(existingCheck.rows[0].week_start));
+      if (existingWeekStart !== currentWeekStart) {
+        needsRegeneration = true;
+      }
+    } else {
+      // Continuous mode: kailangang hindi pa nauubusan ng future dates
+      const maxPlanDate = existingCheck.rows[0].max_plan_date;
+      if (!maxPlanDate || formatLocalDate(new Date(maxPlanDate)) < todayStr) {
+        needsRegeneration = true;
+      }
+    }
+
+    if (needsRegeneration) {
+      try {
+        await generateAndSaveMealPlan(userId, mode);
+      } catch (genErr) {
+        console.error('Auto-regeneration error:', genErr.message);
+        // Kung mabigo ang auto-regen, ituloy pa rin at ipakita na lang ang meron (kung meron)
+      }
+    }
 
     const result = await pool.query(
       `SELECT mp.id, mp.day, mp.meal_type, mp.plan_date, mp.taken, mp.skipped, mp.mode,
@@ -313,13 +359,14 @@ const getMyMealPlan = async (req, res) => {
        WHERE mp.user_id = $1 AND mp.mode = $2
        ORDER BY mp.plan_date ASC,
          CASE mp.meal_type WHEN 'Breakfast' THEN 1 WHEN 'Lunch' THEN 2 WHEN 'Dinner' THEN 3 END`,
-      [userId, mode || 'weekly']
+      [userId, mode]
     );
 
     // Group by day
     const grouped = {};
     result.rows.forEach(row => {
-    const key = formatLocalDate(row.plan_date);      if (!grouped[key]) {
+      const key = formatLocalDate(row.plan_date);
+      if (!grouped[key]) {
         grouped[key] = { date: key, day: row.day, meals: [] };
       }
       grouped[key].meals.push({

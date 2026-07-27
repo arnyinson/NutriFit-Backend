@@ -4,6 +4,81 @@ const axios = require('axios');
 const ML_API_URL = process.env.ML_API_URL || 'http://localhost:5001';
 
 // ============================================
+// SHARED DATE HELPERS
+// ============================================
+
+// Gamitin ang Philippine Time (UTC+8) bilang reference, hindi ang server's default timezone
+const getPhilippineNow = () => {
+  const now = new Date();
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Manila',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const parts = formatter.formatToParts(now);
+  const year = parseInt(parts.find(p => p.type === 'year').value, 10);
+  const month = parseInt(parts.find(p => p.type === 'month').value, 10);
+  const day = parseInt(parts.find(p => p.type === 'day').value, 10);
+  return new Date(year, month - 1, day);
+};
+
+// Helper: format Date object as YYYY-MM-DD using LOCAL date parts (hindi UTC/toISOString)
+const formatLocalDate = (d) => {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+// Kinukuha ang Monday ng kasalukuyang linggo (base sa Philippine Time)
+const getCurrentWeekMonday = () => {
+  const today = getPhilippineNow();
+  const dayOfWeek = today.getDay();
+  const monday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  monday.setDate(monday.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
+  return { today, monday };
+};
+
+// ============================================
+// SHARED: Generate + Save Workout Plan (ginagamit ng generateWorkoutPlan endpoint
+// AT ng auto-regeneration logic sa loob ng getMyWorkoutPlan)
+// ============================================
+const generateAndSaveWorkoutPlan = async (userId, mode, experienceLevel, availableEquipment) => {
+  const mlResponse = await axios.post(`${ML_API_URL}/recommend-workout`, {
+    experience_level: experienceLevel || 'Beginner',
+    available_equipment: availableEquipment || ['Bodyweight', 'Dumbbell'],
+    mode: mode || 'weekly',
+  });
+
+  const { workout_plan } = mlResponse.data.data;
+  const { monday } = getCurrentWeekMonday();
+  const weekStart = formatLocalDate(monday);
+
+  // Clear existing workout plan for this user (same week)
+  await pool.query(
+    'DELETE FROM workout_plans WHERE user_id = $1 AND week_start = $2',
+    [userId, weekStart]
+  );
+
+  // Save new workout plan
+  for (const day of workout_plan) {
+    if (day.is_rest) continue;
+
+    for (const exercise of day.exercises) {
+      await pool.query(
+        `INSERT INTO workout_plans (
+          user_id, exercise_id, day, week_start, sets, reps, done
+        ) VALUES ($1, $2, $3, $4, $5, $6, false)`,
+        [userId, exercise.id, day.day, weekStart, exercise.sets, exercise.reps]
+      );
+    }
+  }
+
+  return { workout_plan, mode: mode || 'weekly' };
+};
+
+// ============================================
 // GET ALL EXERCISES (admin / browsing)
 // ============================================
 const getAllExercises = async (req, res) => {
@@ -148,66 +223,19 @@ const deleteExercise = async (req, res) => {
 };
 
 // ============================================
-// GENERATE WORKOUT PLAN (calls Python ML API, saves to DB)
+// GENERATE WORKOUT PLAN (endpoint - explicit na request mula sa user/app)
 // ============================================
 const generateWorkoutPlan = async (req, res) => {
   try {
     const userId = req.userId;
     const { mode, experience_level, available_equipment } = req.body;
 
-    // Call Python ML API
-    const mlResponse = await axios.post(`${ML_API_URL}/recommend-workout`, {
-      experience_level: experience_level || 'Beginner',
-      available_equipment: available_equipment || ['Bodyweight', 'Dumbbell'],
-      mode: mode || 'weekly',
-    });
-
-    const { workout_plan } = mlResponse.data.data;
-
-    // Helper: format Date object as YYYY-MM-DD using LOCAL date parts (hindi UTC/toISOString)
-    const formatLocalDate = (d) => {
-      const year = d.getFullYear();
-      const month = String(d.getMonth() + 1).padStart(2, '0');
-      const day = String(d.getDate()).padStart(2, '0');
-      return `${year}-${month}-${day}`;
-    };
-
- const getPhilippineNow = () => {
-  const now = new Date();
-  const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
-  return new Date(utcMs + 8 * 60 * 60 * 1000);
-};
-const today = getPhilippineNow();
-const dayOfWeek = today.getDay();
-
-    const monday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    monday.setDate(monday.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
-    const weekStart = formatLocalDate(monday);
-
-    // Clear existing workout plan for this user (same mode)
-    await pool.query(
-      'DELETE FROM workout_plans WHERE user_id = $1 AND week_start = $2',
-      [userId, weekStart]
-    );
-
-    // Save new workout plan
-    for (const day of workout_plan) {
-      if (day.is_rest) continue;
-
-      for (const exercise of day.exercises) {
-        await pool.query(
-          `INSERT INTO workout_plans (
-            user_id, exercise_id, day, week_start, sets, reps, done
-          ) VALUES ($1, $2, $3, $4, $5, $6, false)`,
-          [userId, exercise.id, day.day, weekStart, exercise.sets, exercise.reps]
-        );
-      }
-    }
+    const data = await generateAndSaveWorkoutPlan(userId, mode, experience_level, available_equipment);
 
     res.json({
       success: true,
       message: 'Workout plan generated successfully!',
-      data: { workout_plan, mode: mode || 'weekly' }
+      data,
     });
 
   } catch (err) {
@@ -221,29 +249,38 @@ const dayOfWeek = today.getDay();
 
 // ============================================
 // GET USER'S CURRENT WORKOUT PLAN
+// (may auto-regeneration kung "luma" na ang existing plan)
 // ============================================
 const getMyWorkoutPlan = async (req, res) => {
   try {
     const userId = req.userId;
+    const { monday } = getCurrentWeekMonday();
+    const currentWeekStart = formatLocalDate(monday);
 
-    // Helper: format Date object as YYYY-MM-DD using LOCAL date parts (hindi UTC/toISOString)
-    const formatLocalDate = (d) => {
-      const year = d.getFullYear();
-      const month = String(d.getMonth() + 1).padStart(2, '0');
-      const day = String(d.getDate()).padStart(2, '0');
-      return `${year}-${month}-${day}`;
-    };
+    // I-check kung may existing plan para sa kasalukuyang linggo
+    const existingCheck = await pool.query(
+      `SELECT DISTINCT week_start FROM workout_plans WHERE user_id = $1 LIMIT 1`,
+      [userId]
+    );
 
-      const getPhilippineNow = () => {
-      const now = new Date();
-      const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
-      return new Date(utcMs + 8 * 60 * 60 * 1000);
-    };
-      const today = getPhilippineNow();
-      const dayOfWeek = today.getDay();
-      const monday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-      monday.setDate(monday.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
-      const weekStart = formatLocalDate(monday);
+    let needsRegeneration = false;
+
+    if (existingCheck.rows.length === 0) {
+      needsRegeneration = true;
+    } else {
+      const existingWeekStart = formatLocalDate(new Date(existingCheck.rows[0].week_start));
+      if (existingWeekStart !== currentWeekStart) {
+        needsRegeneration = true;
+      }
+    }
+
+    if (needsRegeneration) {
+      try {
+        await generateAndSaveWorkoutPlan(userId, 'weekly', 'Beginner', ['Bodyweight', 'Dumbbell']);
+      } catch (genErr) {
+        console.error('Auto-regeneration (workout) error:', genErr.message);
+      }
+    }
 
     const result = await pool.query(
       `SELECT wp.id, wp.day, wp.sets, wp.reps, wp.done,
@@ -257,7 +294,7 @@ const getMyWorkoutPlan = async (req, res) => {
            WHEN 'Monday' THEN 1 WHEN 'Tuesday' THEN 2 WHEN 'Wednesday' THEN 3
            WHEN 'Thursday' THEN 4 WHEN 'Friday' THEN 5 WHEN 'Saturday' THEN 6
            WHEN 'Sunday' THEN 7 END`,
-      [userId, weekStart]
+      [userId, currentWeekStart]
     );
 
     // Group by day

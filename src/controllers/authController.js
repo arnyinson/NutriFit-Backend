@@ -224,4 +224,33 @@ const forgotPassword = async (req, res) => {
     res.status(500).json({ error: 'Server error. Please try again.' });
   }
 };
-module.exports = { register, login, getCurrentUser, forgotPassword };
+// ============================================
+// ADMIN LOGIN (para sa Admin Web)
+// ============================================
+const adminLogin = async (req, res) => {
+  try {
+    const { username, password } = req.body;
+
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Please enter username and password.' });
+    }
+
+    if (username !== process.env.ADMIN_USERNAME) {
+      return res.status(401).json({ error: 'Invalid username or password.' });
+    }
+
+    const isValid = await bcrypt.compare(password, process.env.ADMIN_PASSWORD_HASH);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Invalid username or password.' });
+    }
+
+    const token = jwt.sign({ role: 'admin', username }, process.env.JWT_SECRET, { expiresIn: '7d' });
+
+    res.json({ success: true, message: 'Admin login successful!', token });
+
+  } catch (err) {
+    console.error('Admin login error:', err.message);
+    res.status(500).json({ error: 'Server error. Please try again.' });
+  }
+};
+module.exports = { register, login, getCurrentUser, forgotPassword, adminLogin };
