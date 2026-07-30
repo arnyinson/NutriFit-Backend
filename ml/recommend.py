@@ -46,40 +46,48 @@ def calculate_tdee(weight, height, age, sex, activity_level):
         bmr = (10 * weight) + (6.25 * height) - (5 * age) - 161
 
     activity_multipliers = {
-        'Lightly Active (1-2 days per week)': 1.375,
-        'Moderate Active (3-4 days per week)': 1.55,
-        'Very Active (5+ days per week)': 1.725,
+        'Sedentary (little or no exercise)': 1.2,
+        'Lightly Active (1-3 days per week)': 1.375,
+        'Moderately Active (3-5 days per week)': 1.55,
+        'Very Active (6-7 days per week)': 1.725,
+        'Extra Active (very hard exercise / physical job)': 1.9,
     }
     multiplier = activity_multipliers.get(activity_level, 1.55)
     return round(bmr * multiplier)
 
 def calculate_target_calories(tdee, dietary_goal):
+    # Base on  nutritionist validation: fixed na kcal adjustment (300-500 kcal range),
     if dietary_goal == 'Cutting':
-        return round(tdee * 0.80)
+        return round(tdee - 400)
     elif dietary_goal == 'Bulking':
-        return round(tdee * 1.15)
+        return round(tdee + 400)
     else:
         return tdee
 
 def calculate_macro_targets(target_calories, dietary_goal):
+    # Base on nutritionist validation
+    # Cutting: Protein 35-40%, Carbs 30-35%, Fats 25-30%
+    # Bulking: Protein 25-30%, Carbs 45-50%, Fats 20-25%
+    # Maintenance: Protein 10-15%, Carbs 55-75%, Fats 15-30%
     if dietary_goal == 'Cutting':
-        protein_pct = 0.40
-        carbs_pct = 0.35
-        fats_pct = 0.25
+        protein_pct = 0.375
+        carbs_pct = 0.325
+        fats_pct = 0.30
     elif dietary_goal == 'Bulking':
-        protein_pct = 0.30
-        carbs_pct = 0.45
+        protein_pct = 0.275
+        carbs_pct = 0.475
         fats_pct = 0.25
-    else:
-        protein_pct = 0.35
-        carbs_pct = 0.40
-        fats_pct = 0.25
+    else:  # Maintenance
+        protein_pct = 0.125
+        carbs_pct = 0.65
+        fats_pct = 0.225
 
     return {
         'protein': round((target_calories * protein_pct) / 4),
         'carbs': round((target_calories * carbs_pct) / 4),
         'fats': round((target_calories * fats_pct) / 9),
     }
+
 
 def filter_allergens(meals, user_allergens):
     if not user_allergens:

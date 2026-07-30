@@ -1,4 +1,5 @@
 const pool = require('../config/database');
+const { sendPushNotification } = require('../config/pushNotifications');
 
 // ============================================
 // SUBMIT TICKET (User)
@@ -162,7 +163,27 @@ const respondToTicket = async (req, res) => {
       return res.status(404).json({ error: 'Ticket not found.' });
     }
 
-    res.json({ success: true, message: 'Ticket updated successfully.', ticket: result.rows[0] });
+    const ticket = result.rows[0];
+
+    // Ipadala ang push notification sa user na may-ari ng ticket, kung may laman ang admin response
+    if (admin_response && ticket.user_id) {
+      try {
+        const userResult = await pool.query('SELECT push_token FROM users WHERE id = $1', [ticket.user_id]);
+        const pushToken = userResult.rows[0]?.push_token;
+        if (pushToken) {
+          await sendPushNotification(
+            [pushToken],
+            'NutriFit Support',
+            'An admin has responded to your feedback ticket.',
+            { type: 'ticket_response', ticket_id: ticket.id }
+          );
+        }
+      } catch (pushErr) {
+        console.error('Push notification error (non-fatal):', pushErr.message);
+      }
+    }
+
+    res.json({ success: true, message: 'Ticket updated successfully.', ticket });
 
   } catch (err) {
     console.error('Respond to ticket error:', err.message);

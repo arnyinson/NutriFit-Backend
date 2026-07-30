@@ -272,6 +272,27 @@ const getDashboardStats = async (req, res) => {
     res.status(500).json({ error: 'Server error.' });
   }
 };
+// ============================================
+// SAVE PUSH TOKEN (Mobile App)
+// ============================================
+const savePushToken = async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { push_token } = req.body;
+
+    if (!push_token) {
+      return res.status(400).json({ error: 'push_token is required.' });
+    }
+
+    await pool.query('UPDATE users SET push_token = $1 WHERE id = $2', [push_token, userId]);
+
+    res.json({ success: true, message: 'Push token saved.' });
+
+  } catch (err) {
+    console.error('Save push token error:', err.message);
+    res.status(500).json({ error: 'Server error.' });
+  }
+};
 
 module.exports = {
   getMyProfile,
@@ -280,4 +301,5 @@ module.exports = {
   getAllUsers,
   toggleUserStatus,
   getDashboardStats,
+    savePushToken,
 };

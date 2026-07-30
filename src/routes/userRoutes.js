@@ -7,6 +7,7 @@ const {
   getAllUsers,
   toggleUserStatus,
   getDashboardStats,
+  savePushToken,
 } = require('../controllers/userController');
 const verifyToken = require('../middleware/auth');
 
@@ -14,7 +15,7 @@ const verifyToken = require('../middleware/auth');
 router.get('/me', verifyToken, getMyProfile);
 router.put('/me', verifyToken, updateMyProfile);
 router.post('/change-password', verifyToken, changePassword);
-
+router.post('/push-token', verifyToken, savePushToken);
 // Admin routes
 router.get('/', getAllUsers);
 router.patch('/:id/status', toggleUserStatus);
