@@ -1,4 +1,5 @@
 const pool = require('../config/database');
+const { sendPushNotification } = require('../config/pushNotifications');
 
 // Static na listahan ng achievements — ang unlock status ay kino-compute batay sa totoong activity ng user
 const ACHIEVEMENT_DEFINITIONS = [
@@ -102,9 +103,14 @@ const getMyAchievements = async (req, res) => {
     const weightsOnly = progressRows.filter(p => p.weight !== null).map(p => parseFloat(p.weight));
     const weightLost = weightsOnly.length > 1 ? Math.max(0, weightsOnly[0] - weightsOnly[weightsOnly.length - 1]) : 0;
 
-    // Goal set check
-    const userRes = await pool.query('SELECT dietary_goal FROM users WHERE id = $1', [userId]);
+    // Goal set check + push_token + notified_achievements
+    const userRes = await pool.query(
+      'SELECT dietary_goal, push_token, notified_achievements FROM users WHERE id = $1',
+      [userId]
+    );
     const hasSetGoal = !!(userRes.rows[0] && userRes.rows[0].dietary_goal);
+    const pushToken = userRes.rows[0]?.push_token;
+    const alreadyNotified = userRes.rows[0]?.notified_achievements || [];
 
     const stats = {
       mealsTakenTotal,
@@ -130,6 +136,36 @@ const getMyAchievements = async (req, res) => {
 
     const totalXP = achievements.filter(a => a.unlocked).reduce((sum, a) => sum + a.xp, 0);
 
+    // I-detect ang mga BAGONG unlocked achievement (hindi pa dating na-notify)
+    const newlyUnlocked = achievements.filter(
+      (a) => a.unlocked && !alreadyNotified.includes(a.id)
+    );
+
+    if (newlyUnlocked.length > 0) {
+      // I-update muna ang listahan ng na-notify na bago magpadala (iwasan ang duplicate)
+      const updatedNotifiedList = [...alreadyNotified, ...newlyUnlocked.map((a) => a.id)];
+      await pool.query('UPDATE users SET notified_achievements = $1 WHERE id = $2', [
+        updatedNotifiedList,
+        userId,
+      ]);
+
+      if (pushToken) {
+        try {
+          // Isa-isang notification para sa bawat bagong achievement (max 3 lang kada request)
+          for (const achievement of newlyUnlocked.slice(0, 3)) {
+            await sendPushNotification(
+              [pushToken],
+              '🏆 Achievement Unlocked!',
+              `${achievement.title} — +${achievement.xp} XP earned!`,
+              { type: 'achievement_unlocked', achievement_id: achievement.id }
+            );
+          }
+        } catch (pushErr) {
+          console.error('Achievement push notification error (non-fatal):', pushErr.message);
+        }
+      }
+    }
+
     res.json({
       success: true,
       achievements,
@@ -137,7 +173,7 @@ const getMyAchievements = async (req, res) => {
       stats: {
         weightLost: stats.weightLost,
         mealsTaken: mealsTakenTotal,
-        totalCaloriesBurnedEstimate: workoutsCompletedTotal * 150, // simpleng estimate para sa display
+        totalCaloriesBurnedEstimate: workoutsCompletedTotal * 150,
       },
     });
 

@@ -12,6 +12,7 @@ const userRoutes = require('./routes/userRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const achievementRoutes = require('./routes/achievementRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
+const { initMealReminders } = require('./config/mealReminders');
 
 const app = express();
 
@@ -38,4 +39,5 @@ app.use('/api/upload', uploadRoutes);
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
+  initMealReminders();
 });
