@@ -496,6 +496,32 @@ const getFoodLogs = async (req, res) => {
   }
 };
 
+// ============================================
+// GET ALL FOOD LOGS (Admin - monitor outside/manual food logging)
+// ============================================
+const getAllFoodLogs = async (req, res) => {
+  try {
+    const { limit } = req.query;
+    const rowLimit = limit ? parseInt(limit, 10) : 50;
+
+    const result = await pool.query(
+      `SELECT fl.id, fl.food_name, fl.calories, fl.protein, fl.carbs, fl.fats,
+              fl.weight_grams, fl.logged_at, u.name as user_name, u.username
+       FROM food_logs fl
+       JOIN users u ON fl.user_id = u.id
+       ORDER BY fl.logged_at DESC
+       LIMIT $1`,
+      [rowLimit]
+    );
+
+    res.json({ success: true, foodLogs: result.rows });
+
+  } catch (err) {
+    console.error('Get all food logs error:', err.message);
+    res.status(500).json({ error: 'Server error.' });
+  }
+};
+
 module.exports = {
   getAllMeals,
   getMealById,
@@ -508,4 +534,5 @@ module.exports = {
   replaceMealInPlan,
   logFood,
   getFoodLogs,
+  getAllFoodLogs,
 };

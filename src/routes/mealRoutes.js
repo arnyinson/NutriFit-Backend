@@ -12,6 +12,7 @@ const {
   replaceMealInPlan,
   logFood,
   getFoodLogs,
+  getAllFoodLogs,
 } = require('../controllers/mealController');
 const verifyToken = require('../middleware/auth');
 
@@ -21,6 +22,9 @@ const verifyToken = require('../middleware/auth');
 // Food logging routes (require auth)
 router.post('/log', verifyToken, logFood);
 router.get('/log', verifyToken, getFoodLogs);
+
+// Admin route — view ALL users' outside/manual food logs
+router.get('/log/all', getAllFoodLogs);
 
 // User meal plan routes (require auth)
 router.post('/plan/generate', verifyToken, generateMealPlan);
