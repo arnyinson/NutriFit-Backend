@@ -226,8 +226,8 @@ const getDashboardStats = async (req, res) => {
     const activeMealPlans = await pool.query(
       "SELECT COUNT(DISTINCT user_id) FROM meal_plans WHERE week_start >= current_date() - 7"
     );
-    const weeklyReports = await pool.query(
-      "SELECT COUNT(*) FROM progress WHERE date >= current_date() - 7"
+    const activeWorkoutPlans = await pool.query(
+      "SELECT COUNT(DISTINCT user_id) FROM workout_plans WHERE week_start >= current_date() - 7"
     );
     const allergyCases = await pool.query(
       "SELECT COUNT(*) FROM users WHERE array_length(allergens, 1) > 0"
@@ -260,7 +260,7 @@ const getDashboardStats = async (req, res) => {
       stats: {
         totalUsers: totalUsers.rows[0].count,
         activeMealPlans: activeMealPlans.rows[0].count,
-        weeklyReports: weeklyReports.rows[0].count,
+        activeWorkoutPlans: activeWorkoutPlans.rows[0].count,
         allergyCases: allergyCases.rows[0].count,
       },
       goalDistribution: goalDistribution.rows,
@@ -301,5 +301,5 @@ module.exports = {
   getAllUsers,
   toggleUserStatus,
   getDashboardStats,
-    savePushToken,
+  savePushToken,
 };
