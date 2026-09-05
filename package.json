@@ -22,6 +22,7 @@
     "multer": "^2.2.0",
     "node-cron": "^4.6.0",
     "pg": "^8.11.0",
+    "resend": "^6.25.0",
     "streamifier": "^0.1.1"
   },
   "devDependencies": {
