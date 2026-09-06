@@ -1,7 +1,10 @@
 const pool = require('../config/database');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { generateOtp, sendOtpEmail } = require('../config/emailService');
 require('dotenv').config();
+
+const OTP_EXPIRY_MINUTES = 10;
 
 // Calculate BMI
 const calculateBMI = (weight, height) => {
@@ -19,9 +22,11 @@ const calculateTDEE = (weight, height, age, sex, activityLevel) => {
   }
 
   const multipliers = {
-    'Lightly Active (1-2 days per week)': 1.375,
-    'Moderate Active (3-4 days per week)': 1.55,
-    'Very Active (5+ days per week)': 1.725,
+    'Sedentary (little or no exercise)': 1.2,
+    'Lightly Active (1-3 days per week)': 1.375,
+    'Moderately Active (3-5 days per week)': 1.55,
+    'Very Active (6-7 days per week)': 1.725,
+    'Extra Active (very hard exercise / physical job)': 1.9,
   };
   const multiplier = multipliers[activityLevel] || 1.55;
   return Math.round(bmr * multiplier);
@@ -40,7 +45,7 @@ const calculateAge = (birthday) => {
 };
 
 // ============================================
-// REGISTER
+// REGISTER (creates an UNVERIFIED account, sends OTP)
 // ============================================
 const register = async (req, res) => {
   try {
@@ -50,12 +55,10 @@ const register = async (req, res) => {
       dietary_goal, activity_level, allergens
     } = req.body;
 
-    // Validation
     if (!name || !email || !password || !username || !birthday || !sex || !height || !weight || !dietary_goal || !activity_level) {
       return res.status(400).json({ error: 'Please fill in all required fields.' });
     }
 
-    // Check if email or username already exists
     const existingUser = await pool.query(
       'SELECT id FROM users WHERE email = $1 OR username = $2',
       [email, username]
@@ -65,43 +68,150 @@ const register = async (req, res) => {
       return res.status(409).json({ error: 'Email or username already exists.' });
     }
 
-    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Calculate BMI and TDEE
     const age = calculateAge(birthday);
     const bmi = calculateBMI(weight, height);
     const tdee = calculateTDEE(weight, height, age, sex, activity_level);
 
-    // Insert user
+    const otpCode = generateOtp();
+    const otpExpiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
+
     const result = await pool.query(
       `INSERT INTO users (
         name, email, password, username, birthday, sex,
         height, weight, dietary_goal, activity_level,
-        allergens, bmi, tdee
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        allergens, bmi, tdee, otp_code, otp_expires_at, otp_purpose
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
       RETURNING id, name, email, username, dietary_goal, bmi, tdee`,
       [
         name, email, hashedPassword, username, birthday, sex,
         height, weight, dietary_goal, activity_level,
-        allergens || [], bmi, tdee
+        allergens || [], bmi, tdee, otpCode, otpExpiresAt, 'registration'
       ]
     );
 
     const user = result.rows[0];
 
-    // Generate JWT token
-    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '30d' });
+    try {
+      await sendOtpEmail(email, otpCode, 'registration');
+    } catch (emailErr) {
+      console.error('Send registration OTP email error:', emailErr.message);
+    }
 
     res.status(201).json({
       success: true,
-      message: 'Account created successfully!',
-      token,
-      user,
+      message: 'Account created! Please check your email for the verification code.',
+      email: user.email,
+      requiresVerification: true,
     });
 
   } catch (err) {
     console.error('Register error:', err.message);
+    res.status(500).json({ error: 'Server error. Please try again.' });
+  }
+};
+
+// ============================================
+// VERIFY REGISTRATION OTP
+// ============================================
+const verifyRegistrationOtp = async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+
+    if (!email || !otp) {
+      return res.status(400).json({ error: 'Email and code are required.' });
+    }
+
+    const result = await pool.query(
+      `SELECT id, name, email, username, dietary_goal, bmi, tdee, otp_code, otp_expires_at, email_verified
+       FROM users WHERE email = $1`,
+      [email]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Account not found.' });
+    }
+
+    const user = result.rows[0];
+
+    if (user.email_verified) {
+      return res.status(400).json({ error: 'This account is already verified.' });
+    }
+
+    if (!user.otp_code || user.otp_code !== otp) {
+      return res.status(400).json({ error: 'Invalid verification code.' });
+    }
+
+    if (new Date() > new Date(user.otp_expires_at)) {
+      return res.status(400).json({ error: 'Verification code has expired. Please request a new one.' });
+    }
+
+    await pool.query(
+      `UPDATE users SET email_verified = true, otp_code = NULL, otp_expires_at = NULL, otp_purpose = NULL
+       WHERE id = $1`,
+      [user.id]
+    );
+
+    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '30d' });
+
+    res.json({
+      success: true,
+      message: 'Email verified successfully!',
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        username: user.username,
+        dietary_goal: user.dietary_goal,
+        bmi: user.bmi,
+        tdee: user.tdee,
+      },
+    });
+
+  } catch (err) {
+    console.error('Verify registration OTP error:', err.message);
+    res.status(500).json({ error: 'Server error. Please try again.' });
+  }
+};
+
+// ============================================
+// RESEND OTP (works for both registration and forgot-password)
+// ============================================
+const resendOtp = async (req, res) => {
+  try {
+    const { email, purpose } = req.body;
+
+    if (!email || !purpose) {
+      return res.status(400).json({ error: 'Email and purpose are required.' });
+    }
+
+    const userResult = await pool.query('SELECT id, email_verified FROM users WHERE email = $1', [email]);
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Account not found.' });
+    }
+
+    const user = userResult.rows[0];
+
+    if (purpose === 'registration' && user.email_verified) {
+      return res.status(400).json({ error: 'This account is already verified.' });
+    }
+
+    const otpCode = generateOtp();
+    const otpExpiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
+
+    await pool.query(
+      'UPDATE users SET otp_code = $1, otp_expires_at = $2, otp_purpose = $3 WHERE id = $4',
+      [otpCode, otpExpiresAt, purpose, user.id]
+    );
+
+    await sendOtpEmail(email, otpCode, purpose);
+
+    res.json({ success: true, message: 'A new verification code has been sent to your email.' });
+
+  } catch (err) {
+    console.error('Resend OTP error:', err.message);
     res.status(500).json({ error: 'Server error. Please try again.' });
   }
 };
@@ -117,7 +227,6 @@ const login = async (req, res) => {
       return res.status(400).json({ error: 'Please enter username and password.' });
     }
 
-    // Find user by username or email
     const result = await pool.query(
       'SELECT * FROM users WHERE username = $1 OR email = $1',
       [username]
@@ -129,21 +238,25 @@ const login = async (req, res) => {
 
     const user = result.rows[0];
 
-    // Compare password
     const isValidPassword = await bcrypt.compare(password, user.password);
     if (!isValidPassword) {
       return res.status(401).json({ error: 'Invalid username or password.' });
     }
 
-    // Check if account is active
     if (!user.is_active) {
       return res.status(403).json({ error: 'This account has been deactivated. Contact support.' });
     }
 
-    // Generate JWT token
+    if (!user.email_verified) {
+      return res.status(403).json({
+        error: 'Please verify your email before logging in.',
+        requiresVerification: true,
+        email: user.email,
+      });
+    }
+
     const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '30d' });
 
-    // Remove password from response
     delete user.password;
 
     res.json({
@@ -182,8 +295,9 @@ const getCurrentUser = async (req, res) => {
     res.status(500).json({ error: 'Server error.' });
   }
 };
+
 // ============================================
-// FORGOT PASSWORD (generates a temporary password)
+// FORGOT PASSWORD — STEP 1: request an OTP
 // ============================================
 const forgotPassword = async (req, res) => {
   try {
@@ -204,19 +318,20 @@ const forgotPassword = async (req, res) => {
 
     const user = userResult.rows[0];
 
-    // Generate a random temporary password
-    const tempPassword = Math.random().toString(36).slice(-8);
-    const hashedTempPassword = await bcrypt.hash(tempPassword, 10);
+    const otpCode = generateOtp();
+    const otpExpiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
 
-    await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashedTempPassword, user.id]);
+    await pool.query(
+      'UPDATE users SET otp_code = $1, otp_expires_at = $2, otp_purpose = $3 WHERE id = $4',
+      [otpCode, otpExpiresAt, 'forgot_password', user.id]
+    );
 
-    // Note: Sa totoong production app, ipapadala ito via email.
-    // Para sa capstone demo, ibabalik natin mismo sa response.
+    await sendOtpEmail(email, otpCode, 'forgot_password');
+
     res.json({
       success: true,
-      message: 'A temporary password has been generated.',
-      username: user.username,
-      tempPassword: tempPassword,
+      message: 'A verification code has been sent to your email.',
+      email,
     });
 
   } catch (err) {
@@ -224,8 +339,58 @@ const forgotPassword = async (req, res) => {
     res.status(500).json({ error: 'Server error. Please try again.' });
   }
 };
+
 // ============================================
-// ADMIN LOGIN (para sa Admin Web)
+// FORGOT PASSWORD — STEP 2: verify OTP and set new password
+// ============================================
+const resetPassword = async (req, res) => {
+  try {
+    const { email, otp, new_password } = req.body;
+
+    if (!email || !otp || !new_password) {
+      return res.status(400).json({ error: 'Email, code, and new password are required.' });
+    }
+    if (new_password.length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters.' });
+    }
+
+    const result = await pool.query(
+      'SELECT id, otp_code, otp_expires_at, otp_purpose FROM users WHERE email = $1',
+      [email]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Account not found.' });
+    }
+
+    const user = result.rows[0];
+
+    if (!user.otp_code || user.otp_code !== otp || user.otp_purpose !== 'forgot_password') {
+      return res.status(400).json({ error: 'Invalid verification code.' });
+    }
+
+    if (new Date() > new Date(user.otp_expires_at)) {
+      return res.status(400).json({ error: 'Verification code has expired. Please request a new one.' });
+    }
+
+    const hashedPassword = await bcrypt.hash(new_password, 10);
+
+    await pool.query(
+      `UPDATE users SET password = $1, otp_code = NULL, otp_expires_at = NULL, otp_purpose = NULL
+       WHERE id = $2`,
+      [hashedPassword, user.id]
+    );
+
+    res.json({ success: true, message: 'Password reset successfully! You can now log in.' });
+
+  } catch (err) {
+    console.error('Reset password error:', err.message);
+    res.status(500).json({ error: 'Server error. Please try again.' });
+  }
+};
+
+// ============================================
+// ADMIN LOGIN (for Admin Web)
 // ============================================
 const adminLogin = async (req, res) => {
   try {
@@ -253,4 +418,14 @@ const adminLogin = async (req, res) => {
     res.status(500).json({ error: 'Server error. Please try again.' });
   }
 };
-module.exports = { register, login, getCurrentUser, forgotPassword, adminLogin };
+
+module.exports = {
+  register,
+  verifyRegistrationOtp,
+  resendOtp,
+  login,
+  getCurrentUser,
+  forgotPassword,
+  resetPassword,
+  adminLogin,
+};
