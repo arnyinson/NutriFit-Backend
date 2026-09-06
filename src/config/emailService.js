@@ -26,7 +26,7 @@ const sendOtpEmail = async (toEmail, otpCode, purpose) => {
 
   try {
     const result = await resend.emails.send({
-      from: 'NutriFit <onboarding@resend.dev>',
+      from: 'NutriFit <noreply@nutrifitcapstone.xyz>',
       to: toEmail,
       subject,
       html: `
