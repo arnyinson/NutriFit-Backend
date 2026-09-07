@@ -6,6 +6,7 @@ const {
   changePassword,
   getAllUsers,
   toggleUserStatus,
+  unarchiveUser,
   getDashboardStats,
   savePushToken,
 } = require('../controllers/userController');
@@ -19,6 +20,7 @@ router.post('/push-token', verifyToken, savePushToken);
 // Admin routes
 router.get('/', getAllUsers);
 router.patch('/:id/status', toggleUserStatus);
+router.patch('/:id/unarchive', unarchiveUser);
 router.get('/admin/dashboard-stats', getDashboardStats);
 
 module.exports = router;

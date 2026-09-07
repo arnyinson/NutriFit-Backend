@@ -16,9 +16,11 @@ const calculateTDEE = (weight, height, age, sex, activityLevel) => {
     bmr = (10 * weight) + (6.25 * height) - (5 * age) - 161;
   }
   const multipliers = {
-    'Lightly Active (1-2 days per week)': 1.375,
-    'Moderate Active (3-4 days per week)': 1.55,
-    'Very Active (5+ days per week)': 1.725,
+    'Sedentary (little or no exercise)': 1.2,
+    'Lightly Active (1-3 days per week)': 1.375,
+    'Moderately Active (3-5 days per week)': 1.55,
+    'Very Active (6-7 days per week)': 1.725,
+    'Extra Active (very hard exercise / physical job)': 1.9,
   };
   const multiplier = multipliers[activityLevel] || 1.55;
   return Math.round(bmr * multiplier);
@@ -67,12 +69,10 @@ const updateMyProfile = async (req, res) => {
     const userId = req.userId;
     const { name, birthday, sex, height, weight, dietary_goal, activity_level, allergens } = req.body;
 
-    // Recalculate BMI and TDEE if height/weight/birthday/sex/activity changed
     let bmi, tdee;
     if (height && weight) {
       bmi = calculateBMI(parseFloat(weight), parseFloat(height));
 
-      // Need birthday and sex for TDEE - fetch current if not provided
       const current = await pool.query('SELECT birthday, sex, activity_level FROM users WHERE id = $1', [userId]);
       const currentUser = current.rows[0];
       const useBirthday = birthday || currentUser.birthday;
@@ -155,11 +155,12 @@ const changePassword = async (req, res) => {
 // ============================================
 const getAllUsers = async (req, res) => {
   try {
-    const { search, dietary_goal, is_active } = req.query;
+    const { search, dietary_goal, is_active, archived } = req.query;
 
     let query = `
       SELECT id, name, email, username, birthday, sex, height, weight,
-             dietary_goal, activity_level, allergens, bmi, tdee, is_active, avatar_url, created_at
+             dietary_goal, activity_level, allergens, bmi, tdee, is_active,
+             archived, last_login, avatar_url, created_at
       FROM users WHERE 1=1
     `;
     const params = [];
@@ -175,7 +176,13 @@ const getAllUsers = async (req, res) => {
       params.push(dietary_goal);
       paramIndex++;
     }
-    if (is_active !== undefined) {
+    if (archived !== undefined) {
+      query += ` AND archived = $${paramIndex}`;
+      params.push(archived === 'true');
+      paramIndex++;
+    } else if (is_active !== undefined) {
+      // Only apply the is_active filter when NOT specifically filtering by archived status,
+      // so that "Archived" users aren't hidden by an unrelated is_active filter
       query += ` AND is_active = $${paramIndex}`;
       params.push(is_active === 'true');
       paramIndex++;
@@ -218,6 +225,30 @@ const toggleUserStatus = async (req, res) => {
 };
 
 // ============================================
+// UNARCHIVE USER (Admin - manual override)
+// ============================================
+const unarchiveUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      'UPDATE users SET archived = false, last_login = now() WHERE id = $1 RETURNING id, name, archived',
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+
+    res.json({ success: true, message: 'User unarchived successfully.', user: result.rows[0] });
+
+  } catch (err) {
+    console.error('Unarchive user error:', err.message);
+    res.status(500).json({ error: 'Server error.' });
+  }
+};
+
+// ============================================
 // GET DASHBOARD STATS (Admin - Dashboard page)
 // ============================================
 const getDashboardStats = async (req, res) => {
@@ -243,7 +274,6 @@ const getDashboardStats = async (req, res) => {
       FROM users ORDER BY created_at DESC LIMIT 5
     `);
 
-    // Compute age in JS instead of SQL (safer across DB engines)
     const recentUsersWithAge = recentUsers.rows.map(u => {
       const today = new Date();
       const birthDate = new Date(u.birthday);
@@ -272,6 +302,7 @@ const getDashboardStats = async (req, res) => {
     res.status(500).json({ error: 'Server error.' });
   }
 };
+
 // ============================================
 // SAVE PUSH TOKEN (Mobile App)
 // ============================================
@@ -300,6 +331,7 @@ module.exports = {
   changePassword,
   getAllUsers,
   toggleUserStatus,
+  unarchiveUser,
   getDashboardStats,
   savePushToken,
 };

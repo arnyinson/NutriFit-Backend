@@ -255,6 +255,13 @@ const login = async (req, res) => {
       });
     }
 
+    // Track last login time, and un-archive the account if it comes back after being archived
+    await pool.query(
+      'UPDATE users SET last_login = now(), archived = false WHERE id = $1',
+      [user.id]
+    );
+    user.archived = false;
+
     const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '30d' });
 
     delete user.password;
