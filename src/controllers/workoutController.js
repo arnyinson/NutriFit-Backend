@@ -1,6 +1,6 @@
 const pool = require('../config/database');
 const axios = require('axios');
-const { findExerciseGif } = require('../config/exerciseVideoService');
+const { findExerciseId, downloadExerciseImage } = require('../config/exerciseVideoService');
 
 const ML_API_URL = process.env.ML_API_URL || 'http://localhost:5001';
 
@@ -432,10 +432,14 @@ const getExerciseVideo = async (req, res) => {
       return res.json({ success: true, source: 'uploaded', url: exercise.video_url });
     }
 
-    // Fallback: search ExerciseDB for a matching GIF demonstration
-    const gifUrl = await findExerciseGif(exercise.name);
-    if (gifUrl) {
-      return res.json({ success: true, source: 'exercisedb', url: gifUrl });
+    // Fallback: search ExerciseDB, return our OWN proxy URL (not RapidAPI's directly)
+    const exerciseDbId = await findExerciseId(exercise.name);
+    if (exerciseDbId) {
+      return res.json({
+        success: true,
+        source: 'exercisedb',
+        url: `/api/workouts/${id}/video-image`, // our own backend endpoint, not RapidAPI's
+      });
     }
 
     res.json({ success: true, source: 'none', url: null });
@@ -443,6 +447,36 @@ const getExerciseVideo = async (req, res) => {
   } catch (err) {
     console.error('Get exercise video error:', err.message);
     res.status(500).json({ error: 'Server error.' });
+  }
+};
+
+// ============================================
+// PROXY: stream the actual image bytes from ExerciseDB through our own backend
+// (needed because RapidAPI's image URLs require auth headers that <Image> can't send directly)
+// ============================================
+const getExerciseVideoImage = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const exerciseResult = await pool.query('SELECT name FROM exercises WHERE id = $1', [id]);
+    if (exerciseResult.rows.length === 0) {
+      return res.status(404).send('Exercise not found.');
+    }
+
+    const exercise = exerciseResult.rows[0];
+    const exerciseDbId = await findExerciseId(exercise.name);
+    if (!exerciseDbId) {
+      return res.status(404).send('No matching demonstration found.');
+    }
+
+    const { data, contentType } = await downloadExerciseImage(exerciseDbId);
+    res.set('Content-Type', contentType);
+    res.set('Cache-Control', 'public, max-age=86400'); // cache for a day, reduces repeated API calls
+    res.send(Buffer.from(data));
+
+  } catch (err) {
+    console.error('Get exercise video image error:', err.message);
+    res.status(500).send('Server error.');
   }
 };
 
@@ -458,4 +492,5 @@ module.exports = {
   logWorkout,
   getWorkoutLogs,
   getExerciseVideo,
+  getExerciseVideoImage,
 };

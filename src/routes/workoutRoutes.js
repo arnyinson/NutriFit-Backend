@@ -12,6 +12,7 @@ const {
   logWorkout,
   getWorkoutLogs,
   getExerciseVideo,
+  getExerciseVideoImage,
 } = require('../controllers/workoutController');
 const verifyToken = require('../middleware/auth');
 
@@ -29,6 +30,7 @@ router.get('/log', verifyToken, getWorkoutLogs);
 
 // Exercise video (uploaded video first, ExerciseDB GIF fallback)
 router.get('/:id/video', getExerciseVideo);
+router.get('/:id/video-image', getExerciseVideoImage);
 
 // Public/Admin exercise database routes
 router.get('/', getAllExercises);
