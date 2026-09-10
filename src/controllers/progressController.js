@@ -69,6 +69,142 @@ const logProgress = async (req, res) => {
 };
 
 // ============================================
+// SYNC TODAY'S PROGRESS
+// Called from the "Update Progress" button on the Progress screen.
+// Takes the user's current weight as input, updates their profile weight,
+// AND automatically computes today's real calories/workout/meal data from
+// the meal_plans, food_logs, and workout_plans tables (no need for the user
+// to manually re-enter numbers that are already tracked elsewhere in the app).
+// ============================================
+const syncTodayProgress = async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { weight } = req.body;
+
+    if (!weight || isNaN(parseFloat(weight))) {
+      return res.status(400).json({ error: 'Please enter a valid weight.' });
+    }
+
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' }); // YYYY-MM-DD, Philippine time
+
+    // Update the user's profile weight (and recalc BMI/TDEE if we have their other stats)
+    const userResult = await pool.query(
+      'SELECT height, birthday, sex, activity_level, tdee FROM users WHERE id = $1',
+      [userId]
+    );
+    const user = userResult.rows[0];
+
+    let newBmi = null;
+    if (user && user.height) {
+      const heightInMeters = user.height / 100;
+      newBmi = parseFloat((parseFloat(weight) / (heightInMeters * heightInMeters)).toFixed(1));
+    }
+
+    await pool.query(
+      'UPDATE users SET weight = $1, bmi = COALESCE($2, bmi) WHERE id = $3',
+      [weight, newBmi, userId]
+    );
+
+    // Get today's meal plan entries (taken vs total, and sum of calories/macros actually eaten)
+    const mealResult = await pool.query(
+      `SELECT mp.taken, m.calories, m.protein, m.carbs, m.fats
+       FROM meal_plans mp
+       JOIN meals m ON mp.meal_id = m.id
+       WHERE mp.user_id = $1 AND mp.plan_date = $2`,
+      [userId, today]
+    );
+    const mealRows = mealResult.rows;
+    const totalMeals = mealRows.length || 3;
+    const mealsTaken = mealRows.filter(m => m.taken).length;
+    const mealsCaloriesConsumed = mealRows
+      .filter(m => m.taken)
+      .reduce((sum, m) => sum + parseFloat(m.calories || 0), 0);
+    const mealsProteinConsumed = mealRows
+      .filter(m => m.taken)
+      .reduce((sum, m) => sum + parseFloat(m.protein || 0), 0);
+    const mealsCarbsConsumed = mealRows
+      .filter(m => m.taken)
+      .reduce((sum, m) => sum + parseFloat(m.carbs || 0), 0);
+    const mealsFatsConsumed = mealRows
+      .filter(m => m.taken)
+      .reduce((sum, m) => sum + parseFloat(m.fats || 0), 0);
+
+    // Get today's manually logged outside food (extra calories not from the meal plan)
+    const foodLogResult = await pool.query(
+      `SELECT calories, protein, carbs, fats FROM food_logs
+       WHERE user_id = $1 AND DATE(logged_at) = $2`,
+      [userId, today]
+    );
+    const foodLogRows = foodLogResult.rows;
+    const foodLogCalories = foodLogRows.reduce((sum, f) => sum + parseFloat(f.calories || 0), 0);
+    const foodLogProtein = foodLogRows.reduce((sum, f) => sum + parseFloat(f.protein || 0), 0);
+    const foodLogCarbs = foodLogRows.reduce((sum, f) => sum + parseFloat(f.carbs || 0), 0);
+    const foodLogFats = foodLogRows.reduce((sum, f) => sum + parseFloat(f.fats || 0), 0);
+
+    // Get today's workout completion (any exercise marked done today counts as workout_completed)
+    const workoutResult = await pool.query(
+      `SELECT wp.done, e.name
+       FROM workout_plans wp
+       JOIN exercises e ON wp.exercise_id = e.id
+       WHERE wp.user_id = $1
+         AND wp.day = TO_CHAR($2::date, 'FMDay')`,
+      [userId, today]
+    );
+    const workoutRows = workoutResult.rows;
+    const workoutCompleted = workoutRows.length > 0 && workoutRows.every(w => w.done);
+
+    const caloriesConsumed = mealsCaloriesConsumed + foodLogCalories;
+    const proteinConsumed = mealsProteinConsumed + foodLogProtein;
+    const carbsConsumed = mealsCarbsConsumed + foodLogCarbs;
+    const fatsConsumed = mealsFatsConsumed + foodLogFats;
+    const caloriesTarget = parseFloat(user?.tdee || 2000);
+
+    // Save (insert or update) today's progress row with all the computed data
+    const existing = await pool.query(
+      'SELECT id FROM progress WHERE user_id = $1 AND date = $2',
+      [userId, today]
+    );
+
+    let progressRow;
+    if (existing.rows.length > 0) {
+      const updateResult = await pool.query(
+        `UPDATE progress SET
+          weight = $1, calories_consumed = $2, calories_target = $3,
+          protein_consumed = $4, carbs_consumed = $5, fats_consumed = $6,
+          workout_completed = $7, meals_taken = $8, total_meals = $9
+        WHERE user_id = $10 AND date = $11
+        RETURNING *`,
+        [weight, caloriesConsumed, caloriesTarget, proteinConsumed, carbsConsumed,
+         fatsConsumed, workoutCompleted, mealsTaken, totalMeals, userId, today]
+      );
+      progressRow = updateResult.rows[0];
+    } else {
+      const insertResult = await pool.query(
+        `INSERT INTO progress (
+          user_id, date, weight, calories_consumed, calories_target,
+          protein_consumed, carbs_consumed, fats_consumed,
+          workout_completed, meals_taken, total_meals
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        RETURNING *`,
+        [userId, today, weight, caloriesConsumed, caloriesTarget, proteinConsumed,
+         carbsConsumed, fatsConsumed, workoutCompleted, mealsTaken, totalMeals]
+      );
+      progressRow = insertResult.rows[0];
+    }
+
+    res.json({
+      success: true,
+      message: 'Progress updated successfully!',
+      progress: progressRow,
+    });
+
+  } catch (err) {
+    console.error('Sync today progress error:', err.message);
+    res.status(500).json({ error: 'Server error.' });
+  }
+};
+
+// ============================================
 // GET WEIGHT HISTORY (for the weight graph in Profile)
 // ============================================
 const getWeightHistory = async (req, res) => {
@@ -229,6 +365,7 @@ const getProgressByDate = async (req, res) => {
 
 module.exports = {
   logProgress,
+  syncTodayProgress,
   getWeightHistory,
   getWeeklySummary,
   getProgressByDate,
