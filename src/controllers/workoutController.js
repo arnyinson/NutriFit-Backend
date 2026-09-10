@@ -1,5 +1,6 @@
 const pool = require('../config/database');
 const axios = require('axios');
+const { findExerciseGif } = require('../config/exerciseVideoService');
 
 const ML_API_URL = process.env.ML_API_URL || 'http://localhost:5001';
 
@@ -412,6 +413,39 @@ const getWorkoutLogs = async (req, res) => {
   }
 };
 
+// ============================================
+// GET EXERCISE VIDEO (fallback to ExerciseDB GIF if no video_url in our database)
+// ============================================
+const getExerciseVideo = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const exerciseResult = await pool.query('SELECT name, video_url FROM exercises WHERE id = $1', [id]);
+    if (exerciseResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Exercise not found.' });
+    }
+
+    const exercise = exerciseResult.rows[0];
+
+    // If admin already uploaded a real video, use that first
+    if (exercise.video_url) {
+      return res.json({ success: true, source: 'uploaded', url: exercise.video_url });
+    }
+
+    // Fallback: search ExerciseDB for a matching GIF demonstration
+    const gifUrl = await findExerciseGif(exercise.name);
+    if (gifUrl) {
+      return res.json({ success: true, source: 'exercisedb', url: gifUrl });
+    }
+
+    res.json({ success: true, source: 'none', url: null });
+
+  } catch (err) {
+    console.error('Get exercise video error:', err.message);
+    res.status(500).json({ error: 'Server error.' });
+  }
+};
+
 module.exports = {
   getAllExercises,
   getExerciseById,
@@ -423,4 +457,5 @@ module.exports = {
   toggleExerciseDone,
   logWorkout,
   getWorkoutLogs,
+  getExerciseVideo,
 };
