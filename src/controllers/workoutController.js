@@ -1,6 +1,6 @@
 const pool = require('../config/database');
 const axios = require('axios');
-const { findExerciseId, downloadExerciseImage } = require('../config/exerciseVideoService');
+const { findExerciseVideoSource, downloadExerciseImage } = require('../config/exerciseVideoService');
 
 const ML_API_URL = process.env.ML_API_URL || 'http://localhost:5001';
 
@@ -414,7 +414,8 @@ const getWorkoutLogs = async (req, res) => {
 };
 
 // ============================================
-// GET EXERCISE VIDEO (fallback to ExerciseDB GIF if no video_url in our database)
+// GET EXERCISE VIDEO
+// Priority: admin-uploaded video > YouTube search result > ExerciseDB GIF fallback
 // ============================================
 const getExerciseVideo = async (req, res) => {
   try {
@@ -427,22 +428,34 @@ const getExerciseVideo = async (req, res) => {
 
     const exercise = exerciseResult.rows[0];
 
-    // If admin already uploaded a real video, use that first
+    // 1. If admin already uploaded a real video, that always wins
     if (exercise.video_url) {
-      return res.json({ success: true, source: 'uploaded', url: exercise.video_url });
+      return res.json({ success: true, source: 'uploaded', type: 'video', url: exercise.video_url });
     }
 
-    // Fallback: search ExerciseDB, return our OWN proxy URL (not RapidAPI's directly)
-    const exerciseDbId = await findExerciseId(exercise.name);
-    if (exerciseDbId) {
+    // 2. Try YouTube first, then ExerciseDB as backup
+    const videoSource = await findExerciseVideoSource(exercise.name);
+
+    if (!videoSource) {
+      return res.json({ success: true, source: 'none', type: 'none', url: null });
+    }
+
+    if (videoSource.type === 'youtube') {
       return res.json({
         success: true,
-        source: 'exercisedb',
-        url: `/api/workouts/${id}/video-image`, // our own backend endpoint, not RapidAPI's
+        source: 'youtube',
+        type: 'youtube',
+        videoId: videoSource.videoId,
       });
     }
 
-    res.json({ success: true, source: 'none', url: null });
+    // ExerciseDB fallback - return our own proxy URL (not RapidAPI's directly)
+    return res.json({
+      success: true,
+      source: 'exercisedb',
+      type: 'image',
+      url: `/api/workouts/${id}/video-image`,
+    });
 
   } catch (err) {
     console.error('Get exercise video error:', err.message);
@@ -464,12 +477,13 @@ const getExerciseVideoImage = async (req, res) => {
     }
 
     const exercise = exerciseResult.rows[0];
-    const exerciseDbId = await findExerciseId(exercise.name);
-    if (!exerciseDbId) {
+    const videoSource = await findExerciseVideoSource(exercise.name);
+
+    if (!videoSource || videoSource.type !== 'exercisedb') {
       return res.status(404).send('No matching demonstration found.');
     }
 
-    const { data, contentType } = await downloadExerciseImage(exerciseDbId);
+    const { data, contentType } = await downloadExerciseImage(videoSource.exerciseDbId);
     res.set('Content-Type', contentType);
     res.set('Cache-Control', 'public, max-age=86400'); // cache for a day, reduces repeated API calls
     res.send(Buffer.from(data));

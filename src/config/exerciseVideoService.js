@@ -2,12 +2,40 @@ const axios = require('axios');
 
 const RAPIDAPI_HOST = 'exercisedb.p.rapidapi.com';
 
+// ============================================
+// PRIMARY: YouTube Data API v3
+// ============================================
+const findYoutubeVideo = async (exerciseName) => {
+  try {
+    const response = await axios.get('https://www.googleapis.com/youtube/v3/search', {
+      params: {
+        part: 'snippet',
+        q: `${exerciseName} exercise tutorial proper form`,
+        type: 'video',
+        maxResults: 1,
+        videoEmbeddable: 'true',
+        key: process.env.YOUTUBE_API_KEY,
+      },
+    });
+
+    const items = response.data.items;
+    if (!items || items.length === 0) return null;
+
+    return items[0].id.videoId; // return just the video ID
+  } catch (err) {
+    console.error('YouTube search error:', err.message);
+    return null; // fail silently, let the ExerciseDB fallback take over
+  }
+};
+
+// ============================================
+// BACKUP: ExerciseDB (RapidAPI)
+// ============================================
 const headers = () => ({
   'x-rapidapi-host': RAPIDAPI_HOST,
   'x-rapidapi-key': process.env.RAPIDAPI_KEY,
 });
 
-// Basic word-overlap similarity score between two exercise names
 const similarityScore = (a, b) => {
   const wordsA = new Set(a.toLowerCase().split(/\s+/));
   const wordsB = new Set(b.toLowerCase().split(/\s+/));
@@ -31,17 +59,9 @@ const trySearch = async (query) => {
   }
 };
 
-// Search ExerciseDB for the best-matching exercise, return its exerciseId.
-// Tries several search strategies and scores results by word overlap with the
-// original exercise name, to avoid picking an unrelated exercise that happens
-// to share only one common (and often generic) word.
-const findExerciseId = async (exerciseName) => {
+const findExerciseDbId = async (exerciseName) => {
   const cleanName = exerciseName.trim();
-  const words = cleanName.split(/\s+/).filter((w) => w.length > 2); // ignore tiny words like "of", "on"
-
-  // Build a list of search queries to try, from most specific to most generic:
-  // 1. Full name
-  // 2. Each individual significant word (longest first, more likely to be specific)
+  const words = cleanName.split(/\s+/).filter((w) => w.length > 2);
   const queries = [cleanName, ...[...words].sort((a, b) => b.length - a.length)];
 
   let bestMatch = null;
@@ -58,16 +78,12 @@ const findExerciseId = async (exerciseName) => {
         bestMatch = result;
       }
     }
-
-    // If we already found a strong match (2+ overlapping words), stop searching further
     if (bestScore >= 2) break;
   }
 
   return bestMatch ? bestMatch.id : null;
 };
 
-// Downloads the actual image bytes from RapidAPI (with proper auth headers),
-// so the backend can stream them back to the mobile app.
 const downloadExerciseImage = async (exerciseId) => {
   const response = await axios.get(`https://${RAPIDAPI_HOST}/image`, {
     params: { exerciseId, resolution: '360' },
@@ -80,4 +96,23 @@ const downloadExerciseImage = async (exerciseId) => {
   };
 };
 
-module.exports = { findExerciseId, downloadExerciseImage };
+// ============================================
+// MAIN LOOKUP: try YouTube first, fall back to ExerciseDB if it fails
+// ============================================
+const findExerciseVideoSource = async (exerciseName) => {
+  // Try YouTube first (primary)
+  const youtubeVideoId = await findYoutubeVideo(exerciseName);
+  if (youtubeVideoId) {
+    return { type: 'youtube', videoId: youtubeVideoId };
+  }
+
+  // Fall back to ExerciseDB
+  const exerciseDbId = await findExerciseDbId(exerciseName);
+  if (exerciseDbId) {
+    return { type: 'exercisedb', exerciseDbId };
+  }
+
+  return null;
+};
+
+module.exports = { findExerciseVideoSource, downloadExerciseImage };
