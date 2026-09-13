@@ -5,26 +5,26 @@ const RAPIDAPI_HOST = 'exercisedb.p.rapidapi.com';
 // ============================================
 // PRIMARY: YouTube Data API v3
 // ============================================
-const findYoutubeVideo = async (exerciseName) => {
+const findYoutubeVideos = async (exerciseName) => {
   try {
     const response = await axios.get('https://www.googleapis.com/youtube/v3/search', {
       params: {
         part: 'snippet',
         q: `${exerciseName} exercise tutorial proper form`,
         type: 'video',
-        maxResults: 1,
+        maxResults: 5, // fetch several candidates - not all will have embedding disabled
         videoEmbeddable: 'true',
         key: process.env.YOUTUBE_API_KEY,
       },
     });
 
     const items = response.data.items;
-    if (!items || items.length === 0) return null;
+    if (!items || items.length === 0) return [];
 
-    return items[0].id.videoId; // return just the video ID
+    return items.map((item) => item.id.videoId);
   } catch (err) {
     console.error('YouTube search error:', err.message);
-    return null; // fail silently, let the ExerciseDB fallback take over
+    return [];
   }
 };
 
@@ -100,10 +100,11 @@ const downloadExerciseImage = async (exerciseId) => {
 // MAIN LOOKUP: try YouTube first, fall back to ExerciseDB if it fails
 // ============================================
 const findExerciseVideoSource = async (exerciseName) => {
-  // Try YouTube first (primary)
-  const youtubeVideoId = await findYoutubeVideo(exerciseName);
-  if (youtubeVideoId) {
-    return { type: 'youtube', videoId: youtubeVideoId };
+  // Try YouTube first (primary) - return multiple candidates so the app can
+  // try each one in case some have embedding disabled by the video owner
+  const youtubeVideoIds = await findYoutubeVideos(exerciseName);
+  if (youtubeVideoIds.length > 0) {
+    return { type: 'youtube', videoIds: youtubeVideoIds };
   }
 
   // Fall back to ExerciseDB

@@ -441,13 +441,13 @@ const getExerciseVideo = async (req, res) => {
     }
 
     if (videoSource.type === 'youtube') {
-      return res.json({
-        success: true,
-        source: 'youtube',
-        type: 'youtube',
-        videoId: videoSource.videoId,
-      });
-    }
+  return res.json({
+    success: true,
+    source: 'youtube',
+    type: 'youtube',
+    videoIds: videoSource.videoIds,
+  });
+}
 
     // ExerciseDB fallback - return our own proxy URL (not RapidAPI's directly)
     return res.json({
