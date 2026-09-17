@@ -5,6 +5,28 @@ const { sendPushNotification } = require('../config/pushNotifications');
 // SUBMIT TICKET (User)
 // ============================================
 const submitTicket = async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { type, message, image_url } = req.body;
+
+    if (!message || !message.trim()) {
+      return res.status(400).json({ error: 'Please enter your feedback message.' });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO tickets (user_id, type, message, status, image_url)
+       VALUES ($1, $2, $3, 'New', $4)
+       RETURNING *`,
+      [userId, type || 'Other', message, image_url || null]
+    );
+
+    res.status(201).json({ success: true, message: 'Feedback submitted successfully!', ticket: result.rows[0] });
+
+  } catch (err) {
+    console.error('Submit ticket error:', err.message);
+    res.status(500).json({ error: 'Server error.' });
+  }
+};
 
 // ============================================
 // GET MY TICKETS (User - view own ticket history)
@@ -203,4 +225,3 @@ module.exports = {
   respondToTicket,
   updateTicketStatus,
 };
-}
