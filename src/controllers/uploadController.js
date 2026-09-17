@@ -65,4 +65,26 @@ const uploadExerciseVideo = async (req, res) => {
   }
 };
 
-module.exports = { uploadProfilePicture, uploadExerciseVideo };
+// ============================================
+// UPLOAD TICKET/FEEDBACK SCREENSHOT (Mobile App)
+// ============================================
+const uploadTicketImage = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No image file provided.' });
+    }
+
+    const result = await uploadToCloudinary(req.file.buffer, {
+      folder: 'nutrifit/ticket-attachments',
+      transformation: [{ width: 1200, crop: 'limit' }], // cap size, keep aspect ratio
+    });
+
+    res.json({ success: true, message: 'Image uploaded!', image_url: result.secure_url });
+
+  } catch (err) {
+    console.error('Upload ticket image error:', err.message);
+    res.status(500).json({ error: 'Unable to upload image. Please try again.' });
+  }
+};
+
+module.exports = { uploadProfilePicture, uploadExerciseVideo, uploadTicketImage };
