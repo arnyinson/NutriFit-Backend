@@ -114,6 +114,70 @@ const generateAndSaveMealPlan = async (userId, mode) => {
 // ============================================
 // GET ALL MEALS (for admin / meal database browsing)
 // ============================================
+// ============================================
+// SHARED: apply the 3-tier allergen filter (main = exclude, sub = substitute or exclude)
+// to a list of meals for a given set of user allergens. Used by the mobile app's
+// meal search/replace screen, so allergen-containing meals never even appear as options.
+// ============================================
+const applyAllergenFilterToMeals = async (meals, userAllergens) => {
+  if (!userAllergens || userAllergens.length === 0) return meals;
+
+  const substitutesResult = await pool.query('SELECT ingredient_name, allergen, substitute_name FROM allergen_substitutes');
+  const substituteLookup = {};
+  substitutesResult.rows.forEach((row) => {
+    substituteLookup[`${row.ingredient_name.toLowerCase()}|${row.allergen}`] = row.substitute_name;
+  });
+
+  const safeMeals = [];
+
+  for (const meal of meals) {
+    const mainIngredients = meal.main_ingredients || [];
+    const subIngredients = meal.sub_ingredients || [];
+
+    // Tier 1: main ingredient allergen -> automatic exclusion, no substitute
+    const mainHasAllergen = mainIngredients.some((ing) =>
+      (ing.allergens || []).some((a) => userAllergens.includes(a))
+    );
+    if (mainHasAllergen) continue;
+
+    // Tier 2 & 3: sub ingredient allergen -> try substitute, else exclude
+    let mealIsSafe = true;
+    const substitutionsMade = [];
+
+    for (const ing of subIngredients) {
+      const triggered = (ing.allergens || []).filter((a) => userAllergens.includes(a));
+      if (triggered.length === 0) continue;
+
+      let substituteName = ing.substitute_override;
+      if (!substituteName) {
+        for (const allergen of triggered) {
+          substituteName = substituteLookup[`${ing.name.toLowerCase()}|${allergen}`];
+          if (substituteName) break;
+        }
+      }
+
+      if (substituteName) {
+        substitutionsMade.push({ original: ing.name, substitute: substituteName, allergen: triggered[0] });
+      } else {
+        mealIsSafe = false;
+        break;
+      }
+    }
+
+    if (!mealIsSafe) continue;
+
+    safeMeals.push({ ...meal, allergen_substitutions: substitutionsMade });
+  }
+
+  return safeMeals;
+};
+
+// ============================================
+// GET ALL MEALS (for admin / meal database browsing, AND mobile app meal search)
+// If the request is authenticated (has req.userId), allergen-containing meals are
+// automatically filtered out per the 3-tier logic — they never appear in search
+// results at all, matching the "no longer visible for recommendation" requirement.
+// ============================================
 const getAllMeals = async (req, res) => {
   try {
     const { meal_type, category, search } = req.query;
@@ -141,7 +205,16 @@ const getAllMeals = async (req, res) => {
     query += ' ORDER BY name ASC';
 
     const result = await pool.query(query, params);
-    res.json({ success: true, meals: result.rows });
+    let meals = result.rows;
+
+    // If this request came from a logged-in mobile user, filter by their allergens
+    if (req.userId) {
+      const userResult = await pool.query('SELECT allergens FROM users WHERE id = $1', [req.userId]);
+      const userAllergens = userResult.rows[0]?.allergens || [];
+      meals = await applyAllergenFilterToMeals(meals, userAllergens);
+    }
+
+    res.json({ success: true, meals });
 
   } catch (err) {
     console.error('Get all meals error:', err.message);
@@ -214,8 +287,7 @@ const updateMeal = async (req, res) => {
     const { id } = req.params;
     const {
       name, category, meal_type, calories, protein, carbs, fats,
-      allergens, ingredients, instructions, image_url, is_active,
-      main_ingredients, sub_ingredients
+      allergens, ingredients, instructions, image_url, is_active
     } = req.body;
 
     const result = await pool.query(
@@ -232,16 +304,11 @@ const updateMeal = async (req, res) => {
         instructions = COALESCE($10, instructions),
         image_url = COALESCE($11, image_url),
         is_active = COALESCE($12, is_active),
-        main_ingredients = COALESCE($13, main_ingredients),
-        sub_ingredients = COALESCE($14, sub_ingredients),
         updated_at = now()
-      WHERE id = $15
+      WHERE id = $13
       RETURNING *`,
       [name, category, meal_type, calories, protein, carbs, fats,
-       allergens, ingredients, instructions, image_url, is_active,
-       main_ingredients ? JSON.stringify(main_ingredients) : null,
-       sub_ingredients ? JSON.stringify(sub_ingredients) : null,
-       id]
+       allergens, ingredients, instructions, image_url, is_active, id]
     );
 
     if (result.rows.length === 0) {
@@ -252,6 +319,9 @@ const updateMeal = async (req, res) => {
 
   } catch (err) {
     console.error('Update meal error:', err.message);
+    res.status(500).json({ error: 'Server error.' });
+  }
+};
 
 // ============================================
 // DELETE MEAL (Admin)

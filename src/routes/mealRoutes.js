@@ -15,6 +15,7 @@ const {
   getAllFoodLogs,
 } = require('../controllers/mealController');
 const verifyToken = require('../middleware/auth');
+const { optionalVerifyToken } = require('../middleware/auth');
 
 // IMPORTANTE: specific routes muna bago ang generic "/:id" route,
 // kung hindi ay ma-i-interpret ni Express ang "log" o "plan" bilang halaga ng :id
@@ -32,8 +33,10 @@ router.get('/plan/me', verifyToken, getMyMealPlan);
 router.patch('/plan/:planId/toggle', verifyToken, toggleMealStatus);
 router.patch('/plan/:planId/replace', verifyToken, replaceMealInPlan);
 
-// Public/Admin meal database routes
-router.get('/', getAllMeals);
+// Public/Admin meal database routes — optional auth: kung may login ang mobile
+// user, awtomatikong na-a-apply ang allergen filtering; kung wala (Admin Web),
+// nakikita pa rin ang lahat ng meals nang normal.
+router.get('/', optionalVerifyToken, getAllMeals);
 router.post('/', createMeal);
 router.get('/:id', getMealById);
 router.put('/:id', updateMeal);
