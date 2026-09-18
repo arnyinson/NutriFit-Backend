@@ -235,21 +235,25 @@ const getWeightHistory = async (req, res) => {
 };
 
 // ============================================
-// GET WEEKLY SUMMARY (for Progress screen)
+// GET SUMMARY (for Progress screen — Daily, Weekly, or Monthly)
 // ============================================
 const getWeeklySummary = async (req, res) => {
   try {
     const userId = req.userId;
+    const { period } = req.query; // 'daily' | 'weekly' | 'monthly', defaults to weekly
 
-    // Get last 7 days of progress
+    let daysBack = 6; // weekly (7 days total, inclusive of today)
+    if (period === 'daily') daysBack = 0; // ngayong araw lang
+    else if (period === 'monthly') daysBack = 29; // 30 days total
+
     const result = await pool.query(
       `SELECT date, weight, calories_consumed, calories_target,
               protein_consumed, carbs_consumed, fats_consumed,
               workout_completed, meals_taken, total_meals
        FROM progress
-       WHERE user_id = $1 AND date >= current_date() - 6
+       WHERE user_id = $1 AND date >= current_date() - $2::int
        ORDER BY date ASC`,
-      [userId]
+      [userId, daysBack]
     );
 
     const rows = result.rows;
@@ -268,9 +272,12 @@ const getWeeklySummary = async (req, res) => {
       });
     }
 
-    // Daily calories for chart
+    // Daily calories for chart — gamitin ang weekday label sa daily/weekly,
+    // pero petsa (hal. "Sep 5") sa monthly, dahil masyadong dami kung weekday lang
     const dailyCalories = rows.map(r => ({
-      day: new Date(r.date).toLocaleDateString('en-US', { weekday: 'short' }),
+      day: period === 'monthly'
+        ? new Date(r.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+        : new Date(r.date).toLocaleDateString('en-US', { weekday: 'short' }),
       target: parseFloat(r.calories_target || 0),
       actual: parseFloat(r.calories_consumed || 0),
     }));
