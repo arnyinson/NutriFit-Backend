@@ -1,5 +1,5 @@
 const pool = require('../config/database');
-const { sendPushNotification } = require('../config/pushNotifications');
+const { notifyUser } = require('../config/pushNotifications');
 
 // Static na listahan ng achievements — ang unlock status ay kino-compute batay sa totoong activity ng user
 const ACHIEVEMENT_DEFINITIONS = [
@@ -149,20 +149,19 @@ const getMyAchievements = async (req, res) => {
         userId,
       ]);
 
-      if (pushToken) {
-        try {
-          // Isa-isang notification para sa bawat bagong achievement (max 3 lang kada request)
-          for (const achievement of newlyUnlocked.slice(0, 3)) {
-            await sendPushNotification(
-              [pushToken],
-              '🏆 Achievement Unlocked!',
-              `${achievement.title} — +${achievement.xp} XP earned!`,
-              { type: 'achievement_unlocked', achievement_id: achievement.id }
-            );
-          }
-        } catch (pushErr) {
-          console.error('Achievement push notification error (non-fatal):', pushErr.message);
+            try {
+        // Isa-isang notification para sa bawat bagong achievement (max 3 lang kada request)
+        for (const achievement of newlyUnlocked.slice(0, 3)) {
+          await notifyUser(
+            userId,
+            '🏆 Achievement Unlocked!',
+            `${achievement.title} — +${achievement.xp} XP earned!`,
+            'achievement',
+            pushToken
+          );
         }
+      } catch (notifyErr) {
+        console.error('Achievement notify error (non-fatal):', notifyErr.message);
       }
     }
 

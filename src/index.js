@@ -13,6 +13,7 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const achievementRoutes = require('./routes/achievementRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
 const { initMealReminders } = require('./config/mealReminders');
+const { initWorkoutReminders } = require('./config/workoutReminders');
 const { initAutoArchive } = require('./config/autoArchive');
 
 const app = express();
@@ -41,5 +42,6 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   initMealReminders();
+  initWorkoutReminders();
   initAutoArchive();
 });

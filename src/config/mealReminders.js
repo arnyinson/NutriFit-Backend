@@ -1,29 +1,31 @@
 const cron = require('node-cron');
 const pool = require('./database');
-const { sendPushNotification } = require('./pushNotifications');
+const { notifyUser } = require('./pushNotifications');
 
-// Ipinapadala ang reminder sa lahat ng users na may push token
+// Ipinapadala ang reminder sa lahat ng active users — kada user, i-save sa DB
+// at ipadala ang push (kung meron itong push token)
 const sendMealReminder = async (mealType, message) => {
   try {
     const result = await pool.query(
-      "SELECT push_token FROM users WHERE push_token IS NOT NULL AND is_active = true"
+      "SELECT id, push_token FROM users WHERE is_active = true"
     );
 
-    const tokens = result.rows.map((r) => r.push_token).filter(Boolean);
-
-    if (tokens.length === 0) {
-      console.log(`No push tokens found for ${mealType} reminder.`);
+    if (result.rows.length === 0) {
+      console.log(`No active users found for ${mealType} reminder.`);
       return;
     }
 
-    await sendPushNotification(
-      tokens,
-      `🍽️ ${mealType} Time!`,
-      message,
-      { type: 'meal_reminder', meal_type: mealType }
-    );
+    for (const user of result.rows) {
+      await notifyUser(
+        user.id,
+        `🍽️ ${mealType} Time!`,
+        message,
+        'meal',
+        user.push_token
+      );
+    }
 
-    console.log(`${mealType} reminder sent to ${tokens.length} user(s).`);
+    console.log(`${mealType} reminder sent to ${result.rows.length} user(s).`);
   } catch (err) {
     console.error(`Error sending ${mealType} reminder:`, err.message);
   }

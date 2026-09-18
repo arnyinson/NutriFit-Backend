@@ -1,4 +1,5 @@
 const { Expo } = require('expo-server-sdk');
+const pool = require('./database');
 
 const expo = new Expo();
 
@@ -32,4 +33,30 @@ const sendPushNotification = async (pushTokens, title, body, data = {}) => {
   }
 };
 
-module.exports = { sendPushNotification };
+// ============================================
+// SHARED: i-save sa database (para makita sa in-app Notifications screen)
+// AT ipadala ang push notification (para makita kahit nakasara ang app).
+// Ito ang gagamitin ng lahat ng triggers (ticket response, achievement, meal
+// reminder) sa halip na direktang tumawag ng sendPushNotification lang.
+// ============================================
+const notifyUser = async (userId, title, message, type, pushToken) => {
+  try {
+    await pool.query(
+      `INSERT INTO notifications (user_id, title, message, type)
+       VALUES ($1, $2, $3, $4)`,
+      [userId, title, message, type || 'system']
+    );
+  } catch (err) {
+    console.error('Save notification to DB error:', err.message);
+  }
+
+  if (pushToken) {
+    try {
+      await sendPushNotification([pushToken], title, message, { type });
+    } catch (err) {
+      console.error('Send push notification error:', err.message);
+    }
+  }
+};
+
+module.exports = { sendPushNotification, notifyUser };
