@@ -175,7 +175,8 @@ const createMeal = async (req, res) => {
   try {
     const {
       name, category, meal_type, calories, protein, carbs, fats,
-      allergens, ingredients, instructions, image_url
+      allergens, ingredients, instructions, image_url,
+      main_ingredients, sub_ingredients
     } = req.body;
 
     if (!name || !meal_type || !calories) {
@@ -185,13 +186,15 @@ const createMeal = async (req, res) => {
     const result = await pool.query(
       `INSERT INTO meals (
         name, category, meal_type, calories, protein, carbs, fats,
-        allergens, ingredients, instructions, image_url
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        allergens, ingredients, instructions, image_url,
+        main_ingredients, sub_ingredients
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       RETURNING *`,
       [
         name, category || null, meal_type, calories,
         protein || 0, carbs || 0, fats || 0,
-        allergens || [], ingredients || [], instructions || '', image_url || null
+        allergens || [], ingredients || [], instructions || '', image_url || null,
+        JSON.stringify(main_ingredients || []), JSON.stringify(sub_ingredients || [])
       ]
     );
 
@@ -211,7 +214,8 @@ const updateMeal = async (req, res) => {
     const { id } = req.params;
     const {
       name, category, meal_type, calories, protein, carbs, fats,
-      allergens, ingredients, instructions, image_url, is_active
+      allergens, ingredients, instructions, image_url, is_active,
+      main_ingredients, sub_ingredients
     } = req.body;
 
     const result = await pool.query(
@@ -228,11 +232,16 @@ const updateMeal = async (req, res) => {
         instructions = COALESCE($10, instructions),
         image_url = COALESCE($11, image_url),
         is_active = COALESCE($12, is_active),
+        main_ingredients = COALESCE($13, main_ingredients),
+        sub_ingredients = COALESCE($14, sub_ingredients),
         updated_at = now()
-      WHERE id = $13
+      WHERE id = $15
       RETURNING *`,
       [name, category, meal_type, calories, protein, carbs, fats,
-       allergens, ingredients, instructions, image_url, is_active, id]
+       allergens, ingredients, instructions, image_url, is_active,
+       main_ingredients ? JSON.stringify(main_ingredients) : null,
+       sub_ingredients ? JSON.stringify(sub_ingredients) : null,
+       id]
     );
 
     if (result.rows.length === 0) {
@@ -243,9 +252,6 @@ const updateMeal = async (req, res) => {
 
   } catch (err) {
     console.error('Update meal error:', err.message);
-    res.status(500).json({ error: 'Server error.' });
-  }
-};
 
 // ============================================
 // DELETE MEAL (Admin)
