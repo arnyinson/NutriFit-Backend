@@ -17,7 +17,8 @@ def get_meals_from_db():
     cursor = conn.cursor()
     cursor.execute("""
         SELECT id, name, category, meal_type, 
-               calories, protein, carbs, fats, allergens
+               calories, protein, carbs, fats, allergens,
+               main_ingredients, sub_ingredients
         FROM meals
     """)
     rows = cursor.fetchall()
@@ -35,9 +36,28 @@ def get_meals_from_db():
             'protein': float(row[5] or 0),
             'carbs': float(row[6] or 0),
             'fats': float(row[7] or 0),
-            'allergens': row[8] or []
+            'allergens': row[8] or [],
+            'main_ingredients': row[9] or [],
+            'sub_ingredients': row[10] or [],
         })
     return meals
+
+def get_allergen_substitutes_from_db():
+    """
+    Loads the default substitute lookup table into a dict:
+    { (ingredient_name_lowercase, allergen): substitute_name }
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT ingredient_name, allergen, substitute_name FROM allergen_substitutes")
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    lookup = {}
+    for ingredient_name, allergen, substitute_name in rows:
+        lookup[(ingredient_name.lower(), allergen)] = substitute_name
+    return lookup
 
 def calculate_tdee(weight, height, age, sex, activity_level):
     if sex == 'Male':
@@ -89,19 +109,76 @@ def calculate_macro_targets(target_calories, dietary_goal):
     }
 
 
-def filter_allergens(meals, user_allergens):
+def filter_allergens(meals, user_allergens, substitute_lookup):
+    """
+    3-tier allergen filtering, per the capstone objective:
+    1. If a MAIN ingredient contains a user allergen -> exclude the whole meal (no substitute possible).
+    2. If a SUB ingredient contains a user allergen and a safe substitute is available
+       (either a meal-specific override, or the default from allergen_substitutes) ->
+       replace it, keep the meal, and record what was substituted.
+    3. If a SUB ingredient contains a user allergen with NO substitute available ->
+       exclude the meal and let the system recommend a different safe option instead.
+    """
     if not user_allergens:
         return meals
+
     safe_meals = []
+
     for meal in meals:
-        meal_allergens = meal['allergens'] if meal['allergens'] else []
-        has_allergen = any(a in meal_allergens for a in user_allergens)
-        if not has_allergen:
-            safe_meals.append(meal)
+        main_ingredients = meal.get('main_ingredients', [])
+        sub_ingredients = meal.get('sub_ingredients', [])
+
+        # Tier 1: main ingredient allergen check -> automatic exclusion, no substitute
+        main_has_allergen = any(
+            any(a in user_allergens for a in ing.get('allergens', []))
+            for ing in main_ingredients
+        )
+        if main_has_allergen:
+            continue  # excluded, move to the next meal
+
+        # Tier 2 & 3: sub ingredient allergen check -> try to substitute
+        substitutions_made = []
+        meal_is_safe = True
+
+        for ing in sub_ingredients:
+            ing_allergens = ing.get('allergens', [])
+            triggered = [a for a in ing_allergens if a in user_allergens]
+            if not triggered:
+                continue  # this sub ingredient is fine, no allergen match
+
+            # Try a meal-specific override substitute first, then the default lookup table
+            substitute_name = ing.get('substitute_override')
+            if not substitute_name:
+                for allergen in triggered:
+                    substitute_name = substitute_lookup.get((ing['name'].lower(), allergen))
+                    if substitute_name:
+                        break
+
+            if substitute_name:
+                # Tier 2: safe substitute exists, replace and keep the meal
+                substitutions_made.append({
+                    'original': ing['name'],
+                    'substitute': substitute_name,
+                    'allergen': triggered[0],
+                })
+            else:
+                # Tier 3: no substitute available, exclude the meal
+                meal_is_safe = False
+                break
+
+        if not meal_is_safe:
+            continue
+
+        # Attach substitution info (empty list if nothing needed replacing)
+        meal_copy = dict(meal)
+        meal_copy['allergen_substitutions'] = substitutions_made
+        safe_meals.append(meal_copy)
+
     return safe_meals
 
 def recommend_meals(user_profile, mode='weekly'):
     all_meals = get_meals_from_db()
+    substitute_lookup = get_allergen_substitutes_from_db()
 
     tdee = calculate_tdee(
         weight=user_profile['weight'],
@@ -114,7 +191,7 @@ def recommend_meals(user_profile, mode='weekly'):
     target_calories = calculate_target_calories(tdee, user_profile['dietary_goal'])
     macro_targets = calculate_macro_targets(target_calories, user_profile['dietary_goal'])
 
-    safe_meals = filter_allergens(all_meals, user_profile.get('allergens', []))
+    safe_meals = filter_allergens(all_meals, user_profile.get('allergens', []), substitute_lookup)
     if not safe_meals:
         safe_meals = all_meals
 
