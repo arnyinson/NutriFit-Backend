@@ -114,7 +114,9 @@ const syncTodayProgress = async (req, res) => {
       [userId, today]
     );
     const mealRows = mealResult.rows;
-    const totalMeals = mealRows.length || 3;
+    // Huwag mag-default sa 3 kapag walang meal plan entries — 0 talaga kung walang naka-schedule,
+    // para hindi ito "dumagdag" bilang phantom 0% day sa consistency average
+    const totalMeals = mealRows.length;
     const mealsTaken = mealRows.filter(m => m.taken).length;
     const mealsCaloriesConsumed = mealRows
       .filter(m => m.taken)
@@ -141,7 +143,9 @@ const syncTodayProgress = async (req, res) => {
     const foodLogCarbs = foodLogRows.reduce((sum, f) => sum + parseFloat(f.carbs || 0), 0);
     const foodLogFats = foodLogRows.reduce((sum, f) => sum + parseFloat(f.fats || 0), 0);
 
-    // Get today's workout completion (any exercise marked done today counts as workout_completed)
+    // Get today's workout completion — kinukuha na rin ang totoong bilang ng
+    // exercises (hindi lang boolean), para malaman ng getWeeklySummary kung
+    // Rest Day ba ito (total_exercises = 0) at hindi ito bilangin bilang "hindi completed"
     const workoutResult = await pool.query(
       `SELECT wp.done, e.name
        FROM workout_plans wp
@@ -151,7 +155,9 @@ const syncTodayProgress = async (req, res) => {
       [userId, today]
     );
     const workoutRows = workoutResult.rows;
-    const workoutCompleted = workoutRows.length > 0 && workoutRows.every(w => w.done);
+    const totalExercises = workoutRows.length;
+    const exercisesCompleted = workoutRows.filter(w => w.done).length;
+    const workoutCompleted = totalExercises > 0 && exercisesCompleted === totalExercises;
 
     const caloriesConsumed = mealsCaloriesConsumed + foodLogCalories;
     const proteinConsumed = mealsProteinConsumed + foodLogProtein;
@@ -171,11 +177,13 @@ const syncTodayProgress = async (req, res) => {
         `UPDATE progress SET
           weight = $1, calories_consumed = $2, calories_target = $3,
           protein_consumed = $4, carbs_consumed = $5, fats_consumed = $6,
-          workout_completed = $7, meals_taken = $8, total_meals = $9
-        WHERE user_id = $10 AND date = $11
+          workout_completed = $7, meals_taken = $8, total_meals = $9,
+          total_exercises = $10, exercises_completed = $11
+        WHERE user_id = $12 AND date = $13
         RETURNING *`,
         [weight, caloriesConsumed, caloriesTarget, proteinConsumed, carbsConsumed,
-         fatsConsumed, workoutCompleted, mealsTaken, totalMeals, userId, today]
+         fatsConsumed, workoutCompleted, mealsTaken, totalMeals,
+         totalExercises, exercisesCompleted, userId, today]
       );
       progressRow = updateResult.rows[0];
     } else {
@@ -183,11 +191,13 @@ const syncTodayProgress = async (req, res) => {
         `INSERT INTO progress (
           user_id, date, weight, calories_consumed, calories_target,
           protein_consumed, carbs_consumed, fats_consumed,
-          workout_completed, meals_taken, total_meals
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          workout_completed, meals_taken, total_meals,
+          total_exercises, exercises_completed
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         RETURNING *`,
         [userId, today, weight, caloriesConsumed, caloriesTarget, proteinConsumed,
-         carbsConsumed, fatsConsumed, workoutCompleted, mealsTaken, totalMeals]
+         carbsConsumed, fatsConsumed, workoutCompleted, mealsTaken, totalMeals,
+         totalExercises, exercisesCompleted]
       );
       progressRow = insertResult.rows[0];
     }
@@ -249,7 +259,8 @@ const getWeeklySummary = async (req, res) => {
     const result = await pool.query(
       `SELECT date, weight, calories_consumed, calories_target,
               protein_consumed, carbs_consumed, fats_consumed,
-              workout_completed, meals_taken, total_meals
+              workout_completed, meals_taken, total_meals,
+              total_exercises, exercises_completed
        FROM progress
        WHERE user_id = $1 AND date >= current_date() - $2::int
        ORDER BY date ASC`,
@@ -311,13 +322,24 @@ const getWeeklySummary = async (req, res) => {
       fats: Math.round((fatsCals / totalMacroCals) * 100),
     };
 
-    // Consistency
-    const workoutCompletion = Math.round(
-      (rows.filter(r => r.workout_completed).length / rows.length) * 100
-    );
-    const mealConsistency = Math.round(
-      (rows.reduce((s, r) => s + (parseFloat(r.meals_taken || 0) / (parseFloat(r.total_meals) || 3)), 0) / rows.length) * 100
-    );
+    // Consistency — WEIGHTED percentage (total completed ÷ total scheduled),
+    // at IBINUBUKOD ang mga araw na walang naka-schedule (Rest Day / walang
+    // meal plan) sa halip na bilangin sila bilang "0%". Ito ang tamang fix
+    // dahil noon, ang mga Rest Days at "walang meal plan" na araw ay
+    // palaging bumababa ang average kahit wala namang dapat gawin doon.
+    const workoutScheduledRows = rows.filter(r => parseFloat(r.total_exercises || 0) > 0);
+    const totalExercisesScheduled = workoutScheduledRows.reduce((s, r) => s + parseFloat(r.total_exercises || 0), 0);
+    const totalExercisesCompleted = workoutScheduledRows.reduce((s, r) => s + parseFloat(r.exercises_completed || 0), 0);
+    const workoutCompletion = totalExercisesScheduled > 0
+      ? Math.round((totalExercisesCompleted / totalExercisesScheduled) * 100)
+      : 0;
+
+    const mealScheduledRows = rows.filter(r => parseFloat(r.total_meals || 0) > 0);
+    const totalMealsScheduled = mealScheduledRows.reduce((s, r) => s + parseFloat(r.total_meals || 0), 0);
+    const totalMealsTaken = mealScheduledRows.reduce((s, r) => s + parseFloat(r.meals_taken || 0), 0);
+    const mealConsistency = totalMealsScheduled > 0
+      ? Math.round((totalMealsTaken / totalMealsScheduled) * 100)
+      : 0;
 
     res.json({
       success: true,
