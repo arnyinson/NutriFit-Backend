@@ -106,6 +106,11 @@ const syncTodayProgress = async (req, res) => {
       [weight, newBmi, userId]
     );
 
+    // Get today's meal plan entries (taken vs total, and sum of calories/macros actually eaten)
+    // Kailangang i-filter din base sa planMode — kung minsan may existing na entries
+    // ang user sa PAREHONG "weekly" AT "continuous" mode para sa parehong petsa
+    // (dahil nag-switch sila ng mode dati), kaya kailangang piliin lang ang mode
+    // na TALAGANG ginagamit nila ngayon, hindi lahat
     const mealResult = await pool.query(
       `SELECT mp.taken, m.calories, m.protein, m.carbs, m.fats
        FROM meal_plans mp
@@ -114,6 +119,9 @@ const syncTodayProgress = async (req, res) => {
       [userId, today, planMode]
     );
     const mealRows = mealResult.rows;
+    // Huwag mag-default sa 3 kapag walang meal plan entries — 0 talaga kung walang naka-schedule,
+    // para hindi ito "dumagdag" bilang phantom 0% day sa consistency average
+    const totalMeals = mealRows.length;
     const mealsTaken = mealRows.filter(m => m.taken).length;
     const mealsCaloriesConsumed = mealRows
       .filter(m => m.taken)
