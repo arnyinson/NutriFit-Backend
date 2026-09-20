@@ -79,7 +79,8 @@ const logProgress = async (req, res) => {
 const syncTodayProgress = async (req, res) => {
   try {
     const userId = req.userId;
-    const { weight } = req.body;
+    const { weight, mode } = req.body;
+    const planMode = mode === 'continuous' ? 'continuous' : 'weekly'; // default sa 'weekly' kung wala
 
     if (!weight || isNaN(parseFloat(weight))) {
       return res.status(400).json({ error: 'Please enter a valid weight.' });
@@ -105,18 +106,14 @@ const syncTodayProgress = async (req, res) => {
       [weight, newBmi, userId]
     );
 
-    // Get today's meal plan entries (taken vs total, and sum of calories/macros actually eaten)
     const mealResult = await pool.query(
       `SELECT mp.taken, m.calories, m.protein, m.carbs, m.fats
        FROM meal_plans mp
        JOIN meals m ON mp.meal_id = m.id
-       WHERE mp.user_id = $1 AND mp.plan_date = $2`,
-      [userId, today]
+       WHERE mp.user_id = $1 AND mp.plan_date = $2 AND mp.mode = $3`,
+      [userId, today, planMode]
     );
     const mealRows = mealResult.rows;
-    // Huwag mag-default sa 3 kapag walang meal plan entries — 0 talaga kung walang naka-schedule,
-    // para hindi ito "dumagdag" bilang phantom 0% day sa consistency average
-    const totalMeals = mealRows.length;
     const mealsTaken = mealRows.filter(m => m.taken).length;
     const mealsCaloriesConsumed = mealRows
       .filter(m => m.taken)
