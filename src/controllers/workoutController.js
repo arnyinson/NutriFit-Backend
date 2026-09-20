@@ -42,6 +42,69 @@ const getCurrentWeekMonday = () => {
 };
 
 // ============================================
+// PROGRESSIVE OVERLOAD (adaptive feedback loop para sa Workout, katulad ng
+// Gradual Calorie Adjustment sa Meal module). Sinusuri ang totoong workout
+// completion rate noong nakaraang linggo, at awtomatikong nag-a-adjust ng
+// experience level papunta sa mas mahirap (kung palagi nang na-completo) o
+// mas madali (kung palaging kulang), para umangkop ang difficulty sa totoong
+// kakayahan ng user sa paglipas ng panahon.
+// ============================================
+const LEVEL_UP_THRESHOLD = 0.85;   // 85%+ completion -> level up
+const LEVEL_DOWN_THRESHOLD = 0.35; // <35% completion -> level down
+const EXPERIENCE_LEVELS = ['Beginner', 'Intermediate', 'Advanced'];
+
+const applyProgressiveOverload = async (userId) => {
+  try {
+    const userResult = await pool.query(
+      'SELECT workout_experience_level FROM users WHERE id = $1',
+      [userId]
+    );
+    if (userResult.rows.length === 0) return 'Beginner';
+    const currentLevel = userResult.rows[0].workout_experience_level || 'Beginner';
+
+    // Kunin ang totoong completion rate ng nakaraang 7 araw mula sa progress table
+    // (total_exercises / exercises_completed columns, ginawa na natin para sa
+    // consistency percentage fix)
+    const progressResult = await pool.query(
+      `SELECT total_exercises, exercises_completed FROM progress
+       WHERE user_id = $1 AND date >= current_date() - 7 AND total_exercises > 0`,
+      [userId]
+    );
+    const rows = progressResult.rows;
+
+    // Kulang ang datos (walang workout na naka-schedule noong nakaraang linggo) — huwag mag-adjust
+    if (rows.length === 0) return currentLevel;
+
+    const totalScheduled = rows.reduce((sum, r) => sum + parseFloat(r.total_exercises || 0), 0);
+    const totalCompleted = rows.reduce((sum, r) => sum + parseFloat(r.exercises_completed || 0), 0);
+    const completionRate = totalScheduled > 0 ? totalCompleted / totalScheduled : 0;
+
+    const currentIndex = EXPERIENCE_LEVELS.indexOf(currentLevel);
+    let newIndex = currentIndex;
+
+    if (completionRate >= LEVEL_UP_THRESHOLD && currentIndex < EXPERIENCE_LEVELS.length - 1) {
+      newIndex = currentIndex + 1; // level up — kayang-kaya na, bigyan ng mas mahirap
+    } else if (completionRate < LEVEL_DOWN_THRESHOLD && currentIndex > 0) {
+      newIndex = currentIndex - 1; // level down — masyadong mahirap, bawasan para di ma-discourage
+    }
+
+    if (newIndex === currentIndex) return currentLevel; // walang pagbabago
+
+    const newLevel = EXPERIENCE_LEVELS[newIndex];
+    await pool.query(
+      'UPDATE users SET workout_experience_level = $1 WHERE id = $2',
+      [newLevel, userId]
+    );
+
+    console.log(`Progressive overload for user ${userId}: ${currentLevel} -> ${newLevel} (completion rate: ${(completionRate * 100).toFixed(1)}%)`);
+    return newLevel;
+  } catch (err) {
+    console.error('Progressive overload error:', err.message);
+    return 'Beginner'; // ligtas na fallback, hindi natin ito ituturing na fatal error
+  }
+};
+
+// ============================================
 // SHARED: Generate + Save Workout Plan (ginagamit ng generateWorkoutPlan endpoint
 // AT ng auto-regeneration logic sa loob ng getMyWorkoutPlan)
 // ============================================
@@ -277,7 +340,10 @@ const getMyWorkoutPlan = async (req, res) => {
 
     if (needsRegeneration) {
       try {
-        await generateAndSaveWorkoutPlan(userId, 'weekly', 'Beginner', ['Bodyweight', 'Dumbbell']);
+        // Sinusuri muna ang progressive overload (level up/down) bago mag-regenerate,
+        // para ang BAGONG linggo ay gamitin na agad ang na-adjust na experience level
+        const adjustedLevel = await applyProgressiveOverload(userId);
+        await generateAndSaveWorkoutPlan(userId, 'weekly', adjustedLevel, ['Bodyweight', 'Dumbbell']);
       } catch (genErr) {
         console.error('Auto-regeneration (workout) error:', genErr.message);
       }
@@ -441,13 +507,13 @@ const getExerciseVideo = async (req, res) => {
     }
 
     if (videoSource.type === 'youtube') {
-  return res.json({
-    success: true,
-    source: 'youtube',
-    type: 'youtube',
-    videoIds: videoSource.videoIds,
-  });
-}
+      return res.json({
+        success: true,
+        source: 'youtube',
+        type: 'youtube',
+        videoIds: videoSource.videoIds,
+      });
+    }
 
     // ExerciseDB fallback - return our own proxy URL (not RapidAPI's directly)
     return res.json({
