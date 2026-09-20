@@ -41,11 +41,97 @@ const getCurrentWeekMonday = () => {
 };
 
 // ============================================
+// GRADUAL CALORIE ADJUSTMENT (adaptive feedback loop)
+// Sinusuri ang totoong weight change noong nakaraang linggo laban sa inaasahang
+// rate base sa dietary goal, tapos kaunting (±100 kcal) inaayos ang calorie
+// target papunta sa tamang direksyon. Isang beses lang ito tumatakbo bawat
+// linggo, sa simula ng bagong linggo (bago mag-regenerate ng bagong plan).
+// ============================================
+const EXPECTED_WEEKLY_CHANGE = {
+  Cutting: -0.4,      // kg/week — malusog na rate ng pagbaba ng timbang
+  Bulking: 0.25,       // kg/week — malusog na rate ng pagtaas ng timbang
+  Maintenance: 0,      // dapat halos stable
+};
+const ADJUSTMENT_TOLERANCE = 0.15; // kg — sa loob nito, itinuturing na "on track"
+const ADJUSTMENT_STEP = 100;       // kcal — dagdag/bawas bawat linggo
+const MAX_ADJUSTMENT = 300;        // kcal — pinaka-malaking maaabot na kabuuang adjustment
+
+const applyGradualCalorieAdjustment = async (userId) => {
+  try {
+    const userResult = await pool.query(
+      'SELECT dietary_goal, calorie_adjustment FROM users WHERE id = $1',
+      [userId]
+    );
+    if (userResult.rows.length === 0) return;
+    const { dietary_goal, calorie_adjustment } = userResult.rows[0];
+    const currentAdjustment = calorie_adjustment || 0;
+
+    // Kunin ang weight entries ng nakaraang 7 araw
+    const progressResult = await pool.query(
+      `SELECT date, weight FROM progress
+       WHERE user_id = $1 AND weight IS NOT NULL AND date >= current_date() - 7
+       ORDER BY date ASC`,
+      [userId]
+    );
+    const weightRows = progressResult.rows;
+
+    // Kulang ang datos para gumawa ng makatuwirang desisyon — huwag muna mag-adjust
+    if (weightRows.length < 2) return;
+
+    const startWeight = parseFloat(weightRows[0].weight);
+    const endWeight = parseFloat(weightRows[weightRows.length - 1].weight);
+    const actualChange = endWeight - startWeight;
+    const expectedChange = EXPECTED_WEEKLY_CHANGE[dietary_goal] ?? 0;
+
+    let delta = 0;
+
+    if (dietary_goal === 'Cutting') {
+      if (actualChange > expectedChange + ADJUSTMENT_TOLERANCE) {
+        delta = -ADJUSTMENT_STEP; // masyadong mabagal bumaba — dagdagan ang deficit
+      } else if (actualChange < expectedChange - ADJUSTMENT_TOLERANCE) {
+        delta = ADJUSTMENT_STEP; // masyadong mabilis bumaba — bawasan ang deficit, ligtas
+      }
+    } else if (dietary_goal === 'Bulking') {
+      if (actualChange < expectedChange - ADJUSTMENT_TOLERANCE) {
+        delta = ADJUSTMENT_STEP; // masyadong mabagal tumaas — dagdagan ang surplus
+      } else if (actualChange > expectedChange + ADJUSTMENT_TOLERANCE) {
+        delta = -ADJUSTMENT_STEP; // masyadong mabilis tumaas — bawasan ang surplus
+      }
+    } else {
+      // Maintenance — dapat stable, kaunting drift lang
+      if (actualChange > ADJUSTMENT_TOLERANCE) {
+        delta = -ADJUSTMENT_STEP; // tumataas ang timbang — kaunting bawasan
+      } else if (actualChange < -ADJUSTMENT_TOLERANCE) {
+        delta = ADJUSTMENT_STEP; // bumababa ang timbang — kaunting dagdagan
+      }
+    }
+
+    if (delta === 0) return; // on track na, walang kailangang baguhin
+
+    const newAdjustment = Math.max(
+      -MAX_ADJUSTMENT,
+      Math.min(MAX_ADJUSTMENT, currentAdjustment + delta)
+    );
+
+    await pool.query(
+      'UPDATE users SET calorie_adjustment = $1 WHERE id = $2',
+      [newAdjustment, userId]
+    );
+
+    console.log(`Gradual adjustment for user ${userId}: ${currentAdjustment} -> ${newAdjustment} kcal (weekly change: ${actualChange.toFixed(2)}kg, expected: ${expectedChange}kg)`);
+  } catch (err) {
+    console.error('Gradual calorie adjustment error:', err.message);
+    // Hindi natin ito ituturing na fatal error — kung mag-fail ito, mag-proproceed pa rin ang regeneration
+    // gamit ang dating adjustment value
+  }
+};
+
+// ============================================
 // SHARED: Generate + Save Meal Plan
 // ============================================
 const generateAndSaveMealPlan = async (userId, mode) => {
   const userResult = await pool.query(
-    `SELECT birthday, sex, height, weight, dietary_goal, activity_level, allergens
+    `SELECT birthday, sex, height, weight, dietary_goal, activity_level, allergens, calorie_adjustment
      FROM users WHERE id = $1`,
     [userId]
   );
@@ -75,6 +161,7 @@ const generateAndSaveMealPlan = async (userId, mode) => {
     dietary_goal: user.dietary_goal,
     allergens: user.allergens || [],
     mode: mode || 'weekly',
+    calorie_adjustment: user.calorie_adjustment || 0,
   });
 
   const { meal_plan, tdee, target_calories, macro_targets } = mlResponse.data.data;
@@ -111,9 +198,6 @@ const generateAndSaveMealPlan = async (userId, mode) => {
   return { meal_plan, tdee, target_calories, macro_targets, mode: mode || 'weekly' };
 };
 
-// ============================================
-// GET ALL MEALS (for admin / meal database browsing)
-// ============================================
 // ============================================
 // SHARED: apply the 3-tier allergen filter (main = exclude, sub = substitute or exclude)
 // to a list of meals for a given set of user allergens. Used by the mobile app's
@@ -410,6 +494,11 @@ const getMyMealPlan = async (req, res) => {
 
     if (needsRegeneration) {
       try {
+        // Sa simula ng bagong linggo lang natin susuriin at ia-adjust ang
+        // calorie target — tumutugma ito sa "End of Week?" na desisyon sa flowchart
+        if (mode === 'weekly') {
+          await applyGradualCalorieAdjustment(userId);
+        }
         await generateAndSaveMealPlan(userId, mode);
       } catch (genErr) {
         console.error('Auto-regeneration error:', genErr.message);

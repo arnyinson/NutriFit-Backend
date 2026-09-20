@@ -75,14 +75,20 @@ def calculate_tdee(weight, height, age, sex, activity_level):
     multiplier = activity_multipliers.get(activity_level, 1.55)
     return round(bmr * multiplier)
 
-def calculate_target_calories(tdee, dietary_goal):
-    # Base on  nutritionist validation: fixed na kcal adjustment (300-500 kcal range),
+def calculate_target_calories(tdee, dietary_goal, calorie_adjustment=0):
+    # Base on nutritionist validation: fixed na kcal adjustment (300-500 kcal range),
+    # PLUS ang gradual adjustment (adaptive feedback loop base sa totoong weekly
+    # weight progress ng user, tingnan ang mealController.js applyGradualCalorieAdjustment)
     if dietary_goal == 'Cutting':
-        return round(tdee - 400)
+        base = tdee - 400
     elif dietary_goal == 'Bulking':
-        return round(tdee + 400)
+        base = tdee + 400
     else:
-        return tdee
+        base = tdee
+
+    adjusted = base + (calorie_adjustment or 0)
+    # Safety floor — huwag kailanman bumaba sa 1200 kcal, kahit ano pa ang adjustment
+    return round(max(adjusted, 1200))
 
 def calculate_macro_targets(target_calories, dietary_goal):
     # Base on nutritionist validation
@@ -188,7 +194,8 @@ def recommend_meals(user_profile, mode='weekly'):
         activity_level=user_profile['activity_level']
     )
 
-    target_calories = calculate_target_calories(tdee, user_profile['dietary_goal'])
+    calorie_adjustment = user_profile.get('calorie_adjustment', 0)
+    target_calories = calculate_target_calories(tdee, user_profile['dietary_goal'], calorie_adjustment)
     macro_targets = calculate_macro_targets(target_calories, user_profile['dietary_goal'])
 
     safe_meals = filter_allergens(all_meals, user_profile.get('allergens', []), substitute_lookup)
