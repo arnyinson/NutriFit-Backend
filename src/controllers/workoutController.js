@@ -329,21 +329,12 @@ const getMyWorkoutPlan = async (req, res) => {
     const currentWeekStart = formatLocalDate(monday);
 
     // I-check kung may existing plan para sa kasalukuyang linggo
-    const existingCheck = await pool.query(
-      `SELECT DISTINCT week_start FROM workout_plans WHERE user_id = $1 LIMIT 1`,
-      [userId]
+     const existingCheck = await pool.query(
+      `SELECT week_start FROM workout_plans WHERE user_id = $1 AND week_start = $2 LIMIT 1`,
+      [userId, currentWeekStart]
     );
 
-    let needsRegeneration = false;
-
-    if (existingCheck.rows.length === 0) {
-      needsRegeneration = true;
-    } else {
-      const existingWeekStart = formatLocalDate(new Date(existingCheck.rows[0].week_start));
-      if (existingWeekStart !== currentWeekStart) {
-        needsRegeneration = true;
-      }
-    }
+    const needsRegeneration = existingCheck.rows.length === 0;
 
     if (needsRegeneration) {
       try {
