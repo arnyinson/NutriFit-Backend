@@ -371,11 +371,39 @@ def filter_by_equipment(exercises, available_equipment):
     return [e for e in exercises if e['equipment'] in available_equipment]
 
 
+# Sets/Reps scheme base sa dietary goal AT difficulty — tumutugma sa periodization
+# principles: Cutting = mas maraming reps/volume (calorie burn, panatilihin ang
+# muscle), Bulking = mas kaunting reps/mas maraming sets (strength/hypertrophy),
+# Maintenance = balanced default
+SETS_REPS_SCHEME = {
+    'Cutting': {
+        'Beginner': (3, '15 reps'),
+        'Intermediate': (3, '13 reps'),
+        'Advanced': (4, '12 reps'),
+    },
+    'Maintenance': {
+        'Beginner': (3, '12 reps'),
+        'Intermediate': (3, '10 reps'),
+        'Advanced': (4, '8 reps'),
+    },
+    'Bulking': {
+        'Beginner': (3, '10 reps'),
+        'Intermediate': (4, '8 reps'),
+        'Advanced': (5, '6 reps'),
+    },
+}
+
+def get_sets_reps(difficulty, dietary_goal):
+    goal_scheme = SETS_REPS_SCHEME.get(dietary_goal, SETS_REPS_SCHEME['Maintenance'])
+    return goal_scheme.get(difficulty, goal_scheme['Beginner'])
+
+
 def recommend_workout(user_profile, mode='weekly'):
     all_exercises = get_exercises_from_db()
 
     experience_level = user_profile.get('experience_level', 'Beginner')
     available_equipment = user_profile.get('available_equipment', [])
+    dietary_goal = user_profile.get('dietary_goal', 'Maintenance')
 
     filtered = filter_by_experience(all_exercises, experience_level)
     filtered = filter_by_equipment(filtered, available_equipment)
@@ -422,12 +450,7 @@ def recommend_workout(user_profile, mode='weekly'):
             for ex in picked:
                 used_exercise_ids.setdefault(muscle_group, set()).add(ex['id'])
 
-                if ex['difficulty'] == 'Beginner':
-                    sets, reps = 3, '12 reps'
-                elif ex['difficulty'] == 'Intermediate':
-                    sets, reps = 3, '10 reps'
-                else:
-                    sets, reps = 4, '8 reps'
+                sets, reps = get_sets_reps(ex['difficulty'], dietary_goal)
 
                 day_exercises.append({
                     **ex,
@@ -448,4 +471,5 @@ def recommend_workout(user_profile, mode='weekly'):
         'mode': mode,
         'days': days_to_generate,
         'experience_level': experience_level,
+        'dietary_goal': dietary_goal,
     }

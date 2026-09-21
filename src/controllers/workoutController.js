@@ -109,10 +109,17 @@ const applyProgressiveOverload = async (userId) => {
 // AT ng auto-regeneration logic sa loob ng getMyWorkoutPlan)
 // ============================================
 const generateAndSaveWorkoutPlan = async (userId, mode, experienceLevel, availableEquipment) => {
+  // Kunin ang dietary goal ng user — ginagamit ito para i-adjust ang sets/reps
+  // (Cutting = mas maraming reps/volume, Bulking = mas kaunting reps/mas mabigat,
+  // Maintenance = balanced), tumutugma sa ACE guidelines na binanggit sa papel
+  const userResult = await pool.query('SELECT dietary_goal FROM users WHERE id = $1', [userId]);
+  const dietaryGoal = userResult.rows[0]?.dietary_goal || 'Maintenance';
+
   const mlResponse = await axios.post(`${ML_API_URL}/recommend-workout`, {
     experience_level: experienceLevel || 'Beginner',
     available_equipment: availableEquipment || ['Bodyweight', 'Dumbbell'],
     mode: mode || 'weekly',
+    dietary_goal: dietaryGoal,
   });
 
   const { workout_plan } = mlResponse.data.data;
