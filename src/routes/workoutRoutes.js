@@ -13,6 +13,7 @@ const {
   getWorkoutLogs,
   getExerciseVideo,
   getExerciseVideoImage,
+  addCustomWorkoutEntry,
 } = require('../controllers/workoutController');
 const verifyToken = require('../middleware/auth');
 
@@ -23,6 +24,7 @@ const verifyToken = require('../middleware/auth');
 router.post('/plan/generate', verifyToken, generateWorkoutPlan);
 router.get('/plan/me', verifyToken, getMyWorkoutPlan);
 router.patch('/plan/:planId/toggle', verifyToken, toggleExerciseDone);
+router.post('/plan/custom', verifyToken, addCustomWorkoutEntry);
 
 // Workout logging routes (require auth)
 router.post('/log', verifyToken, logWorkout);
