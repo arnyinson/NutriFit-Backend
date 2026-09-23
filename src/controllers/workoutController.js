@@ -557,7 +557,45 @@ const getExerciseVideoImage = async (req, res) => {
     res.status(500).send('Server error.');
   }
 };
+// ============================================
+// ADD CUSTOM WORKOUT ENTRY (user logs their own workout for a specific day —
+// lalabas ito sa listahan ng exercises ng araw na iyon, awtomatikong naka-check
+// na dahil nag-log na sila ng aktwal nilang ginawa)
+// ============================================
+const addCustomWorkoutEntry = async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { day, exercise_id, sets, reps, weight_used } = req.body;
 
+    if (!day || !exercise_id || !sets || !reps) {
+      return res.status(400).json({ error: 'Day, exercise, sets, and reps are required.' });
+    }
+
+    const { monday } = getCurrentWeekMonday();
+    const weekStart = formatLocalDate(monday);
+
+    const result = await pool.query(
+      `INSERT INTO workout_plans (
+        user_id, exercise_id, day, week_start, sets, reps, done, is_custom
+      ) VALUES ($1, $2, $3, $4, $5, $6, true, true)
+      RETURNING id`,
+      [userId, exercise_id, day, weekStart, sets, reps]
+    );
+
+    // I-log din sa workout_logs para consistent sa ibang logging features
+    await pool.query(
+      `INSERT INTO workout_logs (user_id, exercise_id, sets_completed, reps_completed, weight_used)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [userId, exercise_id, sets, reps, weight_used || null]
+    );
+
+    res.status(201).json({ success: true, message: 'Workout added successfully!', planId: result.rows[0].id });
+
+  } catch (err) {
+    console.error('Add custom workout entry error:', err.message);
+    res.status(500).json({ error: 'Server error.' });
+  }
+};
 module.exports = {
   getAllExercises,
   getExerciseById,
@@ -571,4 +609,5 @@ module.exports = {
   getWorkoutLogs,
   getExerciseVideo,
   getExerciseVideoImage,
+  addCustomWorkoutEntry,
 };
