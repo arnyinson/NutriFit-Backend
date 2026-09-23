@@ -1,5 +1,6 @@
 const pool = require('../config/database');
 const axios = require('axios');
+const { notifyUser } = require('../config/pushNotifications');
 
 const ML_API_URL = process.env.ML_API_URL || 'http://localhost:5001';
 
@@ -106,7 +107,24 @@ const applyGradualCalorieAdjustment = async (userId) => {
       }
     }
 
-    if (delta === 0) return; // on track na, walang kailangang baguhin
+    if (delta === 0) {
+      // On track ang user — ito ang Trigger 1: "Weekly Goal Achieved"
+      // notification, dahil malapit ang totoong weight change sa inaasahan
+      try {
+        const pushResult = await pool.query('SELECT push_token FROM users WHERE id = $1', [userId]);
+        const pushToken = pushResult.rows[0]?.push_token;
+        await notifyUser(
+          userId,
+          '🎯 Weekly Goal Achieved!',
+          `Great job! Your progress this week is right on track with your ${dietary_goal.toLowerCase()} goal.`,
+          'progress',
+          pushToken
+        );
+      } catch (notifyErr) {
+        console.error('Weekly goal notification error (non-fatal):', notifyErr.message);
+      }
+      return; // on track na, walang kailangang baguhin sa calorie target
+    }
 
     const newAdjustment = Math.max(
       -MAX_ADJUSTMENT,

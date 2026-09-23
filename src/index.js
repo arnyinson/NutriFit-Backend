@@ -15,6 +15,7 @@ const uploadRoutes = require('./routes/uploadRoutes');
 const { initMealReminders } = require('./config/mealReminders');
 const { initWorkoutReminders } = require('./config/workoutReminders');
 const { initAutoArchive } = require('./config/autoArchive');
+const { initProgressReminders } = require('./config/progressReminders');
 
 const app = express();
 
@@ -44,4 +45,5 @@ app.listen(PORT, () => {
   initMealReminders();
   initWorkoutReminders();
   initAutoArchive();
-});
+  initProgressReminders();
+});;

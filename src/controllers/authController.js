@@ -6,6 +6,20 @@ require('dotenv').config();
 
 const OTP_EXPIRY_MINUTES = 10;
 
+// Account lockout settings — 5 maling attempts, 5 minutong timeout
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_DURATION_MINUTES = 5;
+
+// Parehong password rule na ginagamit sa Register screen — 8+ characters,
+// kailangan ng uppercase, number, at special character
+const isValidPassword = (password) => {
+  const hasMinLength = password.length >= 8;
+  const hasUppercase = /[A-Z]/.test(password);
+  const hasNumber = /[0-9]/.test(password);
+  const hasSpecialChar = /[!@#$%^&*(),.?":{}|<>_\-+=]/.test(password);
+  return hasMinLength && hasUppercase && hasNumber && hasSpecialChar;
+};
+
 // Calculate BMI
 const calculateBMI = (weight, height) => {
   const heightInMeters = height / 100;
@@ -238,9 +252,41 @@ const login = async (req, res) => {
 
     const user = result.rows[0];
 
-    const isValidPassword = await bcrypt.compare(password, user.password);
-    if (!isValidPassword) {
-      return res.status(401).json({ error: 'Invalid username or password.' });
+    // I-check muna kung naka-lock ang account bago pa man i-verify ang password
+    if (user.lockout_until && new Date(user.lockout_until) > new Date()) {
+      const remainingMs = new Date(user.lockout_until) - new Date();
+      const remainingMinutes = Math.ceil(remainingMs / 60000);
+      return res.status(403).json({
+        error: `Too many failed login attempts. Please try again in ${remainingMinutes} minute(s).`,
+      });
+    }
+
+    const isValidCredentials = await bcrypt.compare(password, user.password);
+    if (!isValidCredentials) {
+      // Maling password — dagdagan ang failed attempts counter
+      const newAttempts = (user.failed_login_attempts || 0) + 1;
+
+      if (newAttempts >= MAX_LOGIN_ATTEMPTS) {
+        // Naabot na ang limit — i-lock ang account, i-reset ang counter
+        const lockoutUntil = new Date(Date.now() + LOCKOUT_DURATION_MINUTES * 60000);
+        await pool.query(
+          'UPDATE users SET failed_login_attempts = 0, lockout_until = $1 WHERE id = $2',
+          [lockoutUntil, user.id]
+        );
+        return res.status(403).json({
+          error: `Too many failed login attempts. Your account has been locked for ${LOCKOUT_DURATION_MINUTES} minutes.`,
+        });
+      }
+
+      await pool.query(
+        'UPDATE users SET failed_login_attempts = $1 WHERE id = $2',
+        [newAttempts, user.id]
+      );
+
+      const attemptsLeft = MAX_LOGIN_ATTEMPTS - newAttempts;
+      return res.status(401).json({
+        error: `Invalid username or password. ${attemptsLeft} attempt(s) remaining before lockout.`,
+      });
     }
 
     if (!user.is_active) {
@@ -255,9 +301,10 @@ const login = async (req, res) => {
       });
     }
 
-    // Track last login time, and un-archive the account if it comes back after being archived
+    // Matagumpay na naka-login — i-reset ang failed attempts counter,
+    // i-clear ang lockout, i-track ang last login, at un-archive kung na-archive
     await pool.query(
-      'UPDATE users SET last_login = now(), archived = false WHERE id = $1',
+      'UPDATE users SET last_login = now(), archived = false, failed_login_attempts = 0, lockout_until = NULL WHERE id = $1',
       [user.id]
     );
     user.archived = false;
@@ -357,8 +404,13 @@ const resetPassword = async (req, res) => {
     if (!email || !otp || !new_password) {
       return res.status(400).json({ error: 'Email, code, and new password are required.' });
     }
-    if (new_password.length < 6) {
-      return res.status(400).json({ error: 'New password must be at least 6 characters.' });
+
+    // Parehong password rule na sinusunod sa Register — 8+ characters,
+    // uppercase, number, at special character
+    if (!isValidPassword(new_password)) {
+      return res.status(400).json({
+        error: 'New password must be at least 8 characters and include at least one uppercase letter, one number, and one special character.',
+      });
     }
 
     const result = await pool.query(
@@ -382,8 +434,12 @@ const resetPassword = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(new_password, 10);
 
+    // I-reset din ang failed_login_attempts at lockout_until, sakaling naka-lock
+    // ang account bago pa nito na-reset ang password — magbibigay ito ng
+    // malinis na simula pagkatapos ma-verify ng user ang sarili nila via OTP
     await pool.query(
-      `UPDATE users SET password = $1, otp_code = NULL, otp_expires_at = NULL, otp_purpose = NULL
+      `UPDATE users SET password = $1, otp_code = NULL, otp_expires_at = NULL, otp_purpose = NULL,
+              failed_login_attempts = 0, lockout_until = NULL
        WHERE id = $2`,
       [hashedPassword, user.id]
     );
