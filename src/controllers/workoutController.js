@@ -347,12 +347,14 @@ const getMyWorkoutPlan = async (req, res) => {
       }
     }
 
+    // LEFT JOIN sa halip na INNER JOIN — para kasama rin ang mga custom entries
+    // na WALANG totoong exercise_id (manual na naitype na pangalan lang)
     const result = await pool.query(
-      `SELECT wp.id, wp.day, wp.sets, wp.reps, wp.done,
+      `SELECT wp.id, wp.day, wp.sets, wp.reps, wp.done, wp.custom_exercise_name,
               e.id as exercise_id, e.name, e.muscle_group, e.equipment,
               e.difficulty, e.instructions, e.video_url
        FROM workout_plans wp
-       JOIN exercises e ON wp.exercise_id = e.id
+       LEFT JOIN exercises e ON wp.exercise_id = e.id
        WHERE wp.user_id = $1 AND wp.week_start = $2
        ORDER BY
          CASE wp.day
@@ -368,20 +370,32 @@ const getMyWorkoutPlan = async (req, res) => {
       if (!grouped[row.day]) {
         grouped[row.day] = { day: row.day, exercises: [] };
       }
+      // Kung custom entry (walang totoong exercise_id), gamitin ang manual
+      // na pangalan at bigyan ng "generic" na placeholder ang ibang fields
       grouped[row.day].exercises.push({
         plan_id: row.id,
         sets: row.sets,
         reps: row.reps,
         done: row.done,
-        exercise: {
-          id: row.exercise_id,
-          name: row.name,
-          muscle_group: row.muscle_group,
-          equipment: row.equipment,
-          difficulty: row.difficulty,
-          instructions: row.instructions,
-          video_url: row.video_url,
-        }
+        exercise: row.exercise_id
+          ? {
+              id: row.exercise_id,
+              name: row.name,
+              muscle_group: row.muscle_group,
+              equipment: row.equipment,
+              difficulty: row.difficulty,
+              instructions: row.instructions,
+              video_url: row.video_url,
+            }
+          : {
+              id: null,
+              name: row.custom_exercise_name,
+              muscle_group: "Custom",
+              equipment: "N/A",
+              difficulty: "N/A",
+              instructions: "Manually logged by user.",
+              video_url: null,
+            },
       });
     });
 
@@ -565,10 +579,12 @@ const getExerciseVideoImage = async (req, res) => {
 const addCustomWorkoutEntry = async (req, res) => {
   try {
     const userId = req.userId;
-    const { day, exercise_id, sets, reps, weight_used } = req.body;
+    const { day, exercise_id, custom_exercise_name, sets, reps, weight_used } = req.body;
 
-    if (!day || !exercise_id || !sets || !reps) {
-      return res.status(400).json({ error: 'Day, exercise, sets, and reps are required.' });
+    // Kailangan alinman sa dalawa: totoong exercise_id (mula sa search) O
+    // custom_exercise_name (manual na pangalan) — hindi pwedeng wala parehong
+    if (!day || (!exercise_id && !custom_exercise_name) || !sets || !reps) {
+      return res.status(400).json({ error: 'Day, exercise (or exercise name), sets, and reps are required.' });
     }
 
     const { monday } = getCurrentWeekMonday();
@@ -576,17 +592,17 @@ const addCustomWorkoutEntry = async (req, res) => {
 
     const result = await pool.query(
       `INSERT INTO workout_plans (
-        user_id, exercise_id, day, week_start, sets, reps, done, is_custom
-      ) VALUES ($1, $2, $3, $4, $5, $6, true, true)
+        user_id, exercise_id, custom_exercise_name, day, week_start, sets, reps, done, is_custom
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, true, true)
       RETURNING id`,
-      [userId, exercise_id, day, weekStart, sets, reps]
+      [userId, exercise_id || null, custom_exercise_name || null, day, weekStart, sets, reps]
     );
 
     // I-log din sa workout_logs para consistent sa ibang logging features
     await pool.query(
-      `INSERT INTO workout_logs (user_id, exercise_id, sets_completed, reps_completed, weight_used)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [userId, exercise_id, sets, reps, weight_used || null]
+      `INSERT INTO workout_logs (user_id, exercise_id, custom_exercise_name, sets_completed, reps_completed, weight_used)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [userId, exercise_id || null, custom_exercise_name || null, sets, reps, weight_used || null]
     );
 
     res.status(201).json({ success: true, message: 'Workout added successfully!', planId: result.rows[0].id });
