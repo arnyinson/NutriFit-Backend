@@ -185,9 +185,12 @@ const generateAndSaveMealPlan = async (userId, mode) => {
   const { meal_plan, tdee, target_calories, macro_targets } = mlResponse.data.data;
   const weekStart = formatLocalDate(monday);
 
+  // Tinatanggal lang ang NAKARAANG DATOS PARA SA KASALUKUYANG LINGGO — hindi
+  // dapat mabura ang mga nakaraang linggo, para makita pa rin ito ng user sa
+  // Calendar screen bilang "previous plan" (kailangan ito ayon sa paper)
   await pool.query(
-    'DELETE FROM meal_plans WHERE user_id = $1 AND mode = $2',
-    [userId, mode || 'weekly']
+    'DELETE FROM meal_plans WHERE user_id = $1 AND mode = $2 AND week_start = $3',
+    [userId, mode || 'weekly', weekStart]
   );
 
   for (const day of meal_plan) {
