@@ -481,6 +481,34 @@ const generateMealPlan = async (req, res) => {
 };
 
 // ============================================
+// SHARED: hanapin ang mga sub-ingredient na papalitan para sa allergens ng user
+// (Tier 2 ng 3-tier allergen filter). Ginagamit ng meal plan para makita ng user
+// kung aling sangkap ang pinalitan at kung ano ang ipinalit.
+// ============================================
+const getMealSubstitutions = (subIngredients, userAllergens, substituteLookup) => {
+  const found = [];
+  if (!userAllergens || userAllergens.length === 0) return found;
+
+  for (const ing of subIngredients || []) {
+    const triggered = (ing.allergens || []).filter((a) => userAllergens.includes(a));
+    if (triggered.length === 0) continue;
+
+    let substituteName = ing.substitute_override;
+    if (!substituteName) {
+      for (const allergen of triggered) {
+        substituteName = substituteLookup[`${String(ing.name).toLowerCase()}|${allergen}`];
+        if (substituteName) break;
+      }
+    }
+
+    if (substituteName) {
+      found.push({ original: ing.name, substitute: substituteName, allergen: triggered[0] });
+    }
+  }
+  return found;
+};
+
+// ============================================
 // GET USER'S CURRENT MEAL PLAN
 // ============================================
 const getMyMealPlan = async (req, res) => {
@@ -545,7 +573,7 @@ const getMyMealPlan = async (req, res) => {
     const result = await pool.query(
       `SELECT mp.id, mp.day, mp.meal_type, mp.plan_date, mp.taken, mp.skipped, mp.mode,
               m.id as meal_id, m.name, m.category, m.calories, m.protein, m.carbs, m.fats,
-              m.allergens, m.ingredients, m.instructions
+              m.allergens, m.ingredients, m.instructions, m.sub_ingredients
        FROM meal_plans mp
        JOIN meals m ON mp.meal_id = m.id
        WHERE mp.user_id = $1 AND mp.mode = $2
@@ -554,6 +582,19 @@ const getMyMealPlan = async (req, res) => {
          CASE mp.meal_type WHEN 'Breakfast' THEN 1 WHEN 'Lunch' THEN 2 WHEN 'Dinner' THEN 3 END`,
       [userId, mode]
     );
+
+    // Kunin ang allergens ng user at ang substitute table (kung may allergen lang)
+    const allergenRes = await pool.query('SELECT allergens FROM users WHERE id = $1', [userId]);
+    const userAllergens = allergenRes.rows[0]?.allergens || [];
+    const substituteLookup = {};
+    if (userAllergens.length > 0) {
+      const subsRes = await pool.query(
+        'SELECT ingredient_name, allergen, substitute_name FROM allergen_substitutes'
+      );
+      subsRes.rows.forEach((r) => {
+        substituteLookup[`${r.ingredient_name.toLowerCase()}|${r.allergen}`] = r.substitute_name;
+      });
+    }
 
     const grouped = {};
     result.rows.forEach(row => {
@@ -577,6 +618,7 @@ const getMyMealPlan = async (req, res) => {
           allergens: row.allergens,
           ingredients: row.ingredients,
           instructions: row.instructions,
+          allergen_substitutions: getMealSubstitutions(row.sub_ingredients, userAllergens, substituteLookup),
         }
       });
     });
