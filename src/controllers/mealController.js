@@ -65,7 +65,7 @@ const applyGradualCalorieAdjustment = async (userId) => {
     );
     if (userResult.rows.length === 0) return;
     const { dietary_goal, calorie_adjustment } = userResult.rows[0];
-    const currentAdjustment = calorie_adjustment || 0;
+   const currentAdjustment = parseInt(calorie_adjustment, 10) || 0;
 
     // Kunin ang weight entries ng nakaraang 7 araw
     const progressResult = await pool.query(
@@ -131,6 +131,8 @@ const applyGradualCalorieAdjustment = async (userId) => {
       Math.min(MAX_ADJUSTMENT, currentAdjustment + delta)
     );
 
+    if (!Number.isFinite(newAdjustment)) return;
+
     await pool.query(
       'UPDATE users SET calorie_adjustment = $1 WHERE id = $2',
       [newAdjustment, userId]
@@ -179,7 +181,7 @@ const generateAndSaveMealPlan = async (userId, mode) => {
     dietary_goal: user.dietary_goal,
     allergens: user.allergens || [],
     mode: mode || 'weekly',
-    calorie_adjustment: user.calorie_adjustment || 0,
+    calorie_adjustment: parseInt(user.calorie_adjustment, 10) || 0,
   });
 
   const { meal_plan, tdee, target_calories, macro_targets } = mlResponse.data.data;
@@ -486,31 +488,36 @@ const getMyMealPlan = async (req, res) => {
     const userId = req.userId;
     const mode = req.query.mode || 'weekly';
 
+    // history=true -> ibalik ang lahat ng naka-save na plan (para sa Calendar).
+    // Kapag wala, pinakabagong plan lang ang ibabalik (para sa Meal screen at Dashboard).
+    const includeHistory = req.query.history === 'true';
+
     const { today, monday } = getCurrentWeekMonday();
     const currentWeekStart = formatLocalDate(monday);
     const todayStr = formatLocalDate(today);
 
-    const existingCheck = await pool.query(
-      `SELECT week_start, MAX(plan_date) as max_plan_date
-       FROM meal_plans WHERE user_id = $1 AND mode = $2
-       GROUP BY week_start`,
-      [userId, mode]
-    );
-
     let needsRegeneration = false;
 
-    if (existingCheck.rows.length === 0) {
-      needsRegeneration = true;
-    } else if (mode === 'weekly') {
-      const existingWeekStart = formatLocalDate(new Date(existingCheck.rows[0].week_start));
-      if (existingWeekStart !== currentWeekStart) {
-        needsRegeneration = true;
-      }
+    if (mode === 'weekly') {
+      // Hanapin nang direkta ang plan ng KASALUKUYANG linggo. Dahil nananatili na
+      // ang mga lumang linggo sa database (history), hindi na pwedeng kunin lang
+      // ang "unang row" dahil random ang order nito.
+      const currentWeekCheck = await pool.query(
+        `SELECT 1 FROM meal_plans
+         WHERE user_id = $1 AND mode = $2 AND week_start = $3
+         LIMIT 1`,
+        [userId, mode, currentWeekStart]
+      );
+      needsRegeneration = currentWeekCheck.rows.length === 0;
     } else {
-      const maxPlanDate = existingCheck.rows[0].max_plan_date;
-      if (!maxPlanDate || formatLocalDate(new Date(maxPlanDate)) < todayStr) {
-        needsRegeneration = true;
-      }
+      const maxCheck = await pool.query(
+        `SELECT MAX(plan_date) AS max_plan_date
+         FROM meal_plans WHERE user_id = $1 AND mode = $2`,
+        [userId, mode]
+      );
+      const maxPlanDate = maxCheck.rows[0]?.max_plan_date;
+      needsRegeneration =
+        !maxPlanDate || formatLocalDate(new Date(maxPlanDate)) < todayStr;
     }
 
     if (needsRegeneration) {
@@ -527,6 +534,14 @@ const getMyMealPlan = async (req, res) => {
       }
     }
 
+    // Kung hindi hinihingi ang history, pinakabagong batch lang ng plan ang ibabalik
+    const latestOnlyFilter = includeHistory
+      ? ''
+      : `AND mp.week_start = (
+           SELECT MAX(week_start) FROM meal_plans
+           WHERE user_id = $1 AND mode = $2
+         )`;
+
     const result = await pool.query(
       `SELECT mp.id, mp.day, mp.meal_type, mp.plan_date, mp.taken, mp.skipped, mp.mode,
               m.id as meal_id, m.name, m.category, m.calories, m.protein, m.carbs, m.fats,
@@ -534,6 +549,7 @@ const getMyMealPlan = async (req, res) => {
        FROM meal_plans mp
        JOIN meals m ON mp.meal_id = m.id
        WHERE mp.user_id = $1 AND mp.mode = $2
+       ${latestOnlyFilter}
        ORDER BY mp.plan_date ASC,
          CASE mp.meal_type WHEN 'Breakfast' THEN 1 WHEN 'Lunch' THEN 2 WHEN 'Dinner' THEN 3 END`,
       [userId, mode]

@@ -2,10 +2,15 @@ const cron = require('node-cron');
 const pool = require('./database');
 const { notifyUser } = require('./pushNotifications');
 
+// Rest days ng fixed weekly split (dapat tumugma sa recommend.py)
+const REST_DAYS = ['Wednesday', 'Sunday'];
+
+const getPhilippineNow = () =>
+  new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Manila' }));
+
 // Kinukuha ang Monday ng kasalukuyang linggo (Philippine Time)
 const getCurrentWeekMonday = () => {
-  const now = new Date();
-  const phTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Manila' }));
+  const phTime = getPhilippineNow();
   const dayOfWeek = phTime.getDay();
   const monday = new Date(phTime.getFullYear(), phTime.getMonth(), phTime.getDate());
   monday.setDate(monday.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
@@ -19,30 +24,51 @@ const formatLocalDate = (d) => {
   return `${year}-${month}-${day}`;
 };
 
-const getTodayDayName = () => {
-  const now = new Date();
-  const phTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Manila' }));
-  return phTime.toLocaleDateString('en-US', { weekday: 'long' });
-};
+const getTodayDayName = () =>
+  getPhilippineNow().toLocaleDateString('en-US', { weekday: 'long' });
 
-// Ipinapadala lang ang reminder sa mga users na may naka-schedule na workout
-// ngayong araw (hindi Rest Day) at hindi pa nila na-mark bilang tapos
+// Ipinapadala ang reminder sa:
+// 1. mga user na may pending (done = false) na exercise ngayong araw, O
+// 2. mga user na wala pang plan ngayong linggo (hindi pa nagbubukas ng app)
+//    PERO may plan noong nakaraang linggo (regular na user, hindi dormant),
+//    basta training day ito at hindi Rest Day
 const sendWorkoutReminder = async () => {
   try {
     const monday = getCurrentWeekMonday();
     const weekStart = formatLocalDate(monday);
+    const prevMonday = new Date(monday);
+    prevMonday.setDate(prevMonday.getDate() - 7);
+    const prevWeekStart = formatLocalDate(prevMonday);
     const todayDayName = getTodayDayName();
+    const isTrainingDay = !REST_DAYS.includes(todayDayName);
 
-    // Hanapin ang mga users na may kahit isang exercise ngayong araw na hindi pa "done"
     const result = await pool.query(
-      `SELECT DISTINCT u.id, u.push_token
+      `SELECT u.id, u.push_token
        FROM users u
-       JOIN workout_plans wp ON wp.user_id = u.id
        WHERE u.is_active = true
-         AND wp.week_start = $1
-         AND wp.day = $2
-         AND wp.done = false`,
-      [weekStart, todayDayName]
+         AND (
+           EXISTS (
+             SELECT 1 FROM workout_plans wp
+             WHERE wp.user_id = u.id
+               AND wp.week_start = $1
+               AND wp.day = $2
+               AND wp.done = false
+           )
+           OR (
+             $3::BOOL = true
+             AND NOT EXISTS (
+               SELECT 1 FROM workout_plans wp
+               WHERE wp.user_id = u.id
+                 AND wp.week_start = $1
+             )
+             AND EXISTS (
+               SELECT 1 FROM workout_plans wp
+               WHERE wp.user_id = u.id
+                 AND wp.week_start = $4
+             )
+           )
+         )`,
+      [weekStart, todayDayName, isTrainingDay, prevWeekStart]
     );
 
     if (result.rows.length === 0) {
