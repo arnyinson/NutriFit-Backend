@@ -66,7 +66,7 @@ const register = async (req, res) => {
     const {
       name, email, password, username,
       birthday, sex, height, weight,
-      dietary_goal, activity_level, allergens
+      dietary_goal, activity_level, allergens, available_equipment
     } = req.body;
 
     if (!name || !email || !password || !username || !birthday || !sex || !height || !weight || !dietary_goal || !activity_level) {
@@ -95,13 +95,14 @@ const register = async (req, res) => {
       `INSERT INTO users (
         name, email, password, username, birthday, sex,
         height, weight, dietary_goal, activity_level,
-        allergens, bmi, tdee, otp_code, otp_expires_at, otp_purpose
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        allergens, available_equipment, bmi, tdee, otp_code, otp_expires_at, otp_purpose
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
       RETURNING id, name, email, username, dietary_goal, bmi, tdee`,
       [
         name, email, hashedPassword, username, birthday, sex,
         height, weight, dietary_goal, activity_level,
-        allergens || [], bmi, tdee, otpCode, otpExpiresAt, 'registration'
+        allergens || [], available_equipment || ['Bodyweight'],
+        bmi, tdee, otpCode, otpExpiresAt, 'registration'
       ]
     );
 

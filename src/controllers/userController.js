@@ -44,7 +44,8 @@ const getMyProfile = async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT id, name, email, username, birthday, sex, height, weight,
-              dietary_goal, activity_level, allergens, bmi, tdee, is_active, avatar_url, created_at
+              dietary_goal, activity_level, allergens, available_equipment,
+              bmi, tdee, is_active, avatar_url, created_at
        FROM users WHERE id = $1`,
       [req.userId]
     );
@@ -67,7 +68,7 @@ const getMyProfile = async (req, res) => {
 const updateMyProfile = async (req, res) => {
   try {
     const userId = req.userId;
-    const { name, birthday, sex, height, weight, dietary_goal, activity_level, allergens } = req.body;
+    const { name, birthday, sex, height, weight, dietary_goal, activity_level, allergens, available_equipment } = req.body;
 
     let bmi, tdee;
     if (height && weight) {
@@ -93,13 +94,16 @@ const updateMyProfile = async (req, res) => {
         dietary_goal = COALESCE($6, dietary_goal),
         activity_level = COALESCE($7, activity_level),
         allergens = COALESCE($8, allergens),
-        bmi = COALESCE($9, bmi),
-        tdee = COALESCE($10, tdee),
+        available_equipment = COALESCE($9, available_equipment),
+        bmi = COALESCE($10, bmi),
+        tdee = COALESCE($11, tdee),
         updated_at = now()
-      WHERE id = $11
+      WHERE id = $12
       RETURNING id, name, email, username, birthday, sex, height, weight,
-                dietary_goal, activity_level, allergens, bmi, tdee, avatar_url`,
-      [name, birthday, sex, height, weight, dietary_goal, activity_level, allergens, bmi, tdee, userId]
+                dietary_goal, activity_level, allergens, available_equipment,
+                bmi, tdee, avatar_url`,
+      [name, birthday, sex, height, weight, dietary_goal, activity_level, allergens,
+       available_equipment, bmi, tdee, userId]
     );
 
     if (result.rows.length === 0) {

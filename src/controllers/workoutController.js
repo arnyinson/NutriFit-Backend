@@ -108,16 +108,24 @@ const applyProgressiveOverload = async (userId) => {
 // SHARED: Generate + Save Workout Plan (ginagamit ng generateWorkoutPlan endpoint
 // AT ng auto-regeneration logic sa loob ng getMyWorkoutPlan)
 // ============================================
-const generateAndSaveWorkoutPlan = async (userId, mode, experienceLevel, availableEquipment) => {
-  // Kunin ang dietary goal ng user — ginagamit ito para i-adjust ang sets/reps
-  // (Cutting = mas maraming reps/volume, Bulking = mas kaunting reps/mas mabigat,
-  // Maintenance = balanced), tumutugma sa ACE guidelines na binanggit sa papel
-  const userResult = await pool.query('SELECT dietary_goal FROM users WHERE id = $1', [userId]);
+const generateAndSaveWorkoutPlan = async (userId, mode, experienceLevel, _availableEquipmentIgnored) => {
+  // Kunin ang dietary goal AT ang totoong available_equipment ng user mula sa
+  // database — hindi na umaasa sa params na ipinapasa (dating hardcoded na
+  // ["Bodyweight", "Dumbbell"] sa mobile app, kahit hindi iyon totoong meron
+  // ang user). Ang 4th param ay iniiwan na lang para hindi masira ang existing
+  // na tawag dito, pero hindi na ito ginagamit.
+  const userResult = await pool.query(
+    'SELECT dietary_goal, available_equipment FROM users WHERE id = $1',
+    [userId]
+  );
   const dietaryGoal = userResult.rows[0]?.dietary_goal || 'Maintenance';
+  const userEquipment = userResult.rows[0]?.available_equipment;
+  const equipmentToUse =
+    userEquipment && userEquipment.length > 0 ? userEquipment : ['Bodyweight'];
 
   const mlResponse = await axios.post(`${ML_API_URL}/recommend-workout`, {
     experience_level: experienceLevel || 'Beginner',
-    available_equipment: availableEquipment || ['Bodyweight', 'Dumbbell'],
+    available_equipment: equipmentToUse,
     mode: mode || 'weekly',
     dietary_goal: dietaryGoal,
   });
@@ -126,9 +134,11 @@ const generateAndSaveWorkoutPlan = async (userId, mode, experienceLevel, availab
   const { monday } = getCurrentWeekMonday();
   const weekStart = formatLocalDate(monday);
 
-  // Clear existing workout plan for this user (same week)
+  // Clear existing AI-GENERATED workout plan lang para sa linggong ito —
+  // panatilihin ang mga custom-logged workout (is_custom = true) para hindi
+  // mabura ang "Log Own Workout" entries ng user tuwing mag-re-regenerate
   await pool.query(
-    'DELETE FROM workout_plans WHERE user_id = $1 AND week_start = $2',
+    'DELETE FROM workout_plans WHERE user_id = $1 AND week_start = $2 AND is_custom = false',
     [userId, weekStart]
   );
 
