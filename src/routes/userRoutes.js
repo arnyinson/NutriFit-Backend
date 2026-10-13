@@ -6,6 +6,8 @@ const {
   changePassword,
   getAllUsers,
   getUserDetails,
+  banUser,
+  unbanUser,
   toggleUserStatus,
   unarchiveUser,
   getDashboardStats,
@@ -22,6 +24,8 @@ router.post('/push-token', verifyToken, savePushToken);
 router.get('/', getAllUsers);
 router.patch('/:id/status', toggleUserStatus);
 router.patch('/:id/unarchive', unarchiveUser);
+router.patch('/:id/ban', banUser);
+router.patch('/:id/unban', unbanUser);
 router.get('/admin/dashboard-stats', getDashboardStats);
 router.get('/:id/details', getUserDetails);
 

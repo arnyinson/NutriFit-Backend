@@ -290,8 +290,18 @@ const login = async (req, res) => {
       });
     }
 
+    if (user.banned) {
+      return res.status(403).json({
+        error: `Your account has been banned. Reason: ${user.ban_reason || 'Violation of the Terms and Conditions'}. If you believe this is a mistake, please contact support.`,
+        code: 'ACCOUNT_BANNED',
+      });
+    }
+
     if (!user.is_active) {
-      return res.status(403).json({ error: 'This account has been deactivated. Contact support.' });
+      return res.status(403).json({
+        error: 'This account has been deactivated. Contact support.',
+        code: 'ACCOUNT_DEACTIVATED',
+      });
     }
 
     if (!user.email_verified) {

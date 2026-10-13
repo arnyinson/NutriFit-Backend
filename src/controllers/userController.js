@@ -159,12 +159,12 @@ const changePassword = async (req, res) => {
 // ============================================
 const getAllUsers = async (req, res) => {
   try {
-    const { search, dietary_goal, is_active, archived } = req.query;
+    const { search, dietary_goal, is_active, archived, banned } = req.query;
 
     let query = `
       SELECT id, name, email, username, birthday, sex, height, weight,
              dietary_goal, activity_level, allergens, bmi, tdee, is_active,
-             archived, last_login, avatar_url, created_at
+             archived, banned, ban_reason, banned_at, last_login, avatar_url, created_at
       FROM users WHERE 1=1
     `;
     const params = [];
@@ -180,14 +180,20 @@ const getAllUsers = async (req, res) => {
       params.push(dietary_goal);
       paramIndex++;
     }
-    if (archived !== undefined) {
+    if (banned !== undefined) {
+      query += ` AND banned = $${paramIndex}`;
+      params.push(banned === 'true');
+      paramIndex++;
+    } else if (archived !== undefined) {
       query += ` AND archived = $${paramIndex}`;
       params.push(archived === 'true');
       paramIndex++;
     } else if (is_active !== undefined) {
       // Only apply the is_active filter when NOT specifically filtering by archived status,
       // so that "Archived" users aren't hidden by an unrelated is_active filter
-      query += ` AND is_active = $${paramIndex}`;
+      // Banned users are always is_active = false, so exclude them here —
+      // they have their own "Banned" filter.
+      query += ` AND banned = false AND is_active = $${paramIndex}`;
       params.push(is_active === 'true');
       paramIndex++;
     }
@@ -204,7 +210,7 @@ const getAllUsers = async (req, res) => {
 };
 
 // ============================================
-// GET USER DETAILS (Admin - full profile + workout progress history)
+// GET USER DETAILS (Admin - full profile)
 // ============================================
 const getUserDetails = async (req, res) => {
   try {
@@ -213,7 +219,8 @@ const getUserDetails = async (req, res) => {
     const userResult = await pool.query(
       `SELECT id, name, email, username, birthday, sex, height, weight,
               dietary_goal, activity_level, allergens, available_equipment,
-              bmi, tdee, is_active, archived, last_login, created_at
+              bmi, tdee, is_active, archived, banned, ban_reason, banned_at,
+              last_login, created_at
        FROM users WHERE id = $1`,
       [id]
     );
@@ -222,50 +229,86 @@ const getUserDetails = async (req, res) => {
       return res.status(404).json({ error: 'User not found.' });
     }
 
-    // Weekly completion history (latest 8 weeks)
-    const weeklyResult = await pool.query(
-      `SELECT week_start::text AS week_start,
-              COUNT(*)::int AS total,
-              (COUNT(*) FILTER (WHERE done = true))::int AS completed
-       FROM workout_plans
-       WHERE user_id = $1
-       GROUP BY week_start
-       ORDER BY week_start DESC
-       LIMIT 8`,
-      [id]
-    );
-
-    // Most recent logged workouts (includes manual/custom entries)
-    const logsResult = await pool.query(
-      `SELECT wl.id,
-              COALESCE(e.name, wl.custom_exercise_name, 'Custom workout') AS exercise_name,
-              wl.sets_completed, wl.reps_completed, wl.weight_used, wl.logged_at
-       FROM workout_logs wl
-       LEFT JOIN exercises e ON wl.exercise_id = e.id
-       WHERE wl.user_id = $1
-       ORDER BY wl.logged_at DESC
-       LIMIT 15`,
-      [id]
-    );
-
-    const totals = weeklyResult.rows.reduce(
-      (acc, w) => ({ total: acc.total + w.total, completed: acc.completed + w.completed }),
-      { total: 0, completed: 0 }
-    );
-
     res.json({
       success: true,
       user: userResult.rows[0],
-      workout: {
-        total: totals.total,
-        completed: totals.completed,
-        weekly: weeklyResult.rows,
-        recentLogs: logsResult.rows,
-      },
     });
 
   } catch (err) {
     console.error('Get user details error:', err.message);
+    res.status(500).json({ error: 'Server error.' });
+  }
+};
+
+// ============================================
+// BAN / UNBAN USER (Admin)
+// Ban = permanent and needs a reason that the user sees on login.
+// Deactivate = temporary suspension (no reason required).
+// ============================================
+const BAN_REASONS = [
+  'Fake or unrealistic account',
+  'Duplicate account',
+  'Violation of Terms and Conditions',
+  'Abuse or spam in Support tickets',
+  'Providing harmful false information',
+  'Other',
+];
+
+const banUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const reason = String(req.body.reason || '').trim();
+    const note = String(req.body.note || '').trim().slice(0, 150);
+
+    if (!BAN_REASONS.includes(reason)) {
+      return res.status(400).json({ error: 'Please select a valid ban reason.' });
+    }
+    if (reason === 'Other' && !note) {
+      return res.status(400).json({ error: 'Please describe the reason for the ban.' });
+    }
+
+    const banReason = reason === 'Other' ? note : note ? `${reason} - ${note}` : reason;
+
+    const result = await pool.query(
+      `UPDATE users
+       SET banned = true, ban_reason = $1, banned_at = now(), is_active = false
+       WHERE id = $2
+       RETURNING id, name, is_active, banned, ban_reason, banned_at`,
+      [banReason, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+
+    res.json({ success: true, message: 'User banned.', user: result.rows[0] });
+
+  } catch (err) {
+    console.error('Ban user error:', err.message);
+    res.status(500).json({ error: 'Server error.' });
+  }
+};
+
+const unbanUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `UPDATE users
+       SET banned = false, ban_reason = NULL, banned_at = NULL, is_active = true
+       WHERE id = $1
+       RETURNING id, name, is_active, banned`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+
+    res.json({ success: true, message: 'User unbanned.', user: result.rows[0] });
+
+  } catch (err) {
+    console.error('Unban user error:', err.message);
     res.status(500).json({ error: 'Server error.' });
   }
 };
@@ -402,6 +445,8 @@ module.exports = {
   changePassword,
   getAllUsers,
   getUserDetails,
+  banUser,
+  unbanUser,
   toggleUserStatus,
   unarchiveUser,
   getDashboardStats,
