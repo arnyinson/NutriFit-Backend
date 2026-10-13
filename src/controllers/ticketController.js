@@ -146,25 +146,31 @@ const respondToTicket = async (req, res) => {
     const { id } = req.params;
     const { admin_response, status } = req.body;
 
+    // responded_at is only refreshed when the reply text actually changes
     const result = await pool.query(
       `UPDATE tickets SET
         admin_response = COALESCE($1, admin_response),
+        responded_at = CASE
+          WHEN $1::text IS NOT NULL AND $1::text <> ''
+               AND $1::text IS DISTINCT FROM admin_response THEN now()
+          ELSE responded_at
+        END,
         status = COALESCE($2, status),
         updated_at = now()
       WHERE id = $3
       RETURNING *`,
-      [admin_response, status || 'Resolved', id]
+      [admin_response ?? null, status || 'Resolved', id]
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Ticket not found.' });
     }
 
-        const ticket = result.rows[0];
+    const ticket = result.rows[0];
 
-    // I-save sa DB (para makita sa in-app Notifications screen) AT ipadala ang push,
-    // kung may laman ang admin response
-    if (admin_response && ticket.user_id) {
+    // Save to DB (in-app Notifications screen) AND send push when there is a reply.
+    // type 'ticket' + ticket_id lets the mobile app open the conversation on tap.
+    if (admin_response && admin_response.trim() && ticket.user_id) {
       try {
         const userResult = await pool.query('SELECT push_token FROM users WHERE id = $1', [ticket.user_id]);
         const pushToken = userResult.rows[0]?.push_token;
@@ -172,8 +178,9 @@ const respondToTicket = async (req, res) => {
           ticket.user_id,
           'NutriFit Support',
           'An admin has responded to your feedback ticket.',
-          'system',
-          pushToken
+          'ticket',
+          pushToken,
+          { ticket_id: String(ticket.id) }
         );
       } catch (notifyErr) {
         console.error('Notify user error (non-fatal):', notifyErr.message);
