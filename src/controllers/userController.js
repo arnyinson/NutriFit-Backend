@@ -204,6 +204,73 @@ const getAllUsers = async (req, res) => {
 };
 
 // ============================================
+// GET USER DETAILS (Admin - full profile + workout progress history)
+// ============================================
+const getUserDetails = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const userResult = await pool.query(
+      `SELECT id, name, email, username, birthday, sex, height, weight,
+              dietary_goal, activity_level, allergens, available_equipment,
+              bmi, tdee, is_active, archived, last_login, created_at
+       FROM users WHERE id = $1`,
+      [id]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+
+    // Weekly completion history (latest 8 weeks)
+    const weeklyResult = await pool.query(
+      `SELECT week_start::text AS week_start,
+              COUNT(*)::int AS total,
+              (COUNT(*) FILTER (WHERE done = true))::int AS completed
+       FROM workout_plans
+       WHERE user_id = $1
+       GROUP BY week_start
+       ORDER BY week_start DESC
+       LIMIT 8`,
+      [id]
+    );
+
+    // Most recent logged workouts (includes manual/custom entries)
+    const logsResult = await pool.query(
+      `SELECT wl.id,
+              COALESCE(e.name, wl.custom_exercise_name, 'Custom workout') AS exercise_name,
+              wl.sets_completed, wl.reps_completed, wl.weight_used, wl.logged_at
+       FROM workout_logs wl
+       LEFT JOIN exercises e ON wl.exercise_id = e.id
+       WHERE wl.user_id = $1
+       ORDER BY wl.logged_at DESC
+       LIMIT 15`,
+      [id]
+    );
+
+    const totals = weeklyResult.rows.reduce(
+      (acc, w) => ({ total: acc.total + w.total, completed: acc.completed + w.completed }),
+      { total: 0, completed: 0 }
+    );
+
+    res.json({
+      success: true,
+      user: userResult.rows[0],
+      workout: {
+        total: totals.total,
+        completed: totals.completed,
+        weekly: weeklyResult.rows,
+        recentLogs: logsResult.rows,
+      },
+    });
+
+  } catch (err) {
+    console.error('Get user details error:', err.message);
+    res.status(500).json({ error: 'Server error.' });
+  }
+};
+
+// ============================================
 // TOGGLE USER ACTIVE STATUS (Admin - Activate/Deactivate)
 // ============================================
 const toggleUserStatus = async (req, res) => {
@@ -334,6 +401,7 @@ module.exports = {
   updateMyProfile,
   changePassword,
   getAllUsers,
+  getUserDetails,
   toggleUserStatus,
   unarchiveUser,
   getDashboardStats,
