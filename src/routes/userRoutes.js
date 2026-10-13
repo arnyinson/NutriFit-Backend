@@ -5,6 +5,7 @@ const {
   updateMyProfile,
   changePassword,
   getAllUsers,
+  getUserDetails,
   toggleUserStatus,
   unarchiveUser,
   getDashboardStats,
@@ -22,5 +23,6 @@ router.get('/', getAllUsers);
 router.patch('/:id/status', toggleUserStatus);
 router.patch('/:id/unarchive', unarchiveUser);
 router.get('/admin/dashboard-stats', getDashboardStats);
+router.get('/:id/details', getUserDetails);
 
 module.exports = router;
