@@ -32,6 +32,10 @@ def get_recommendations():
             'activity_level': data['activity_level'],
             'dietary_goal': data['dietary_goal'],
             'allergens': data.get('allergens', []),
+            # DATI HINDI NAIPAPASA: kaya laging 0 ang gradual calorie adjustment
+            'calorie_adjustment': int(data.get('calorie_adjustment', 0) or 0),
+            # Bago: None / Pescatarian / Vegetarian / Vegan
+            'dietary_preference': data.get('dietary_preference', 'None'),
         }
 
         mode = data.get('mode', 'weekly')
@@ -72,7 +76,7 @@ def get_tdee():
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    
+
 @app.route('/recommend-workout', methods=['POST'])
 def get_workout_recommendations():
     try:
@@ -81,6 +85,8 @@ def get_workout_recommendations():
         user_profile = {
             'experience_level': data.get('experience_level', 'Beginner'),
             'available_equipment': data.get('available_equipment', []),
+            # DATI HINDI NAIPAPASA: kaya laging Maintenance ang sets/reps scheme
+            'dietary_goal': data.get('dietary_goal', 'Maintenance'),
         }
 
         mode = data.get('mode', 'weekly')
@@ -94,6 +100,7 @@ def get_workout_recommendations():
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     print('Starting NutriFit ML API...')
     app.run(host='0.0.0.0', port=5001, debug=True)

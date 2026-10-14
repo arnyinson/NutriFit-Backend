@@ -64,13 +64,25 @@ const calculateAge = (birthday) => {
 const register = async (req, res) => {
   try {
     const {
-      name, email, password, username,
+      name, first_name, middle_name, last_name, email, password, username,
       birthday, sex, height, weight,
-      dietary_goal, activity_level, allergens, available_equipment
+      dietary_goal, activity_level, allergens, available_equipment, dietary_preference
     } = req.body;
 
-    if (!name || !email || !password || !username || !birthday || !sex || !height || !weight || !dietary_goal || !activity_level) {
+    // Full name is built from First / Middle / Last (middle is optional)
+    const firstName = (first_name || '').trim();
+    const middleName = (middle_name || '').trim();
+    const lastName = (last_name || '').trim();
+    const fullName = [firstName, middleName, lastName].filter(Boolean).join(' ') || (name || '').trim();
+
+    if (!fullName || !firstName || !lastName || !email || !password || !username || !birthday || !sex || !height || !weight || !dietary_goal || !activity_level) {
       return res.status(400).json({ error: 'Please fill in all required fields.' });
+    }
+
+    const VALID_DIETS = ['None', 'Pescatarian', 'Vegetarian', 'Vegan'];
+    const dietPref = dietary_preference || 'None';
+    if (!VALID_DIETS.includes(dietPref)) {
+      return res.status(400).json({ error: 'Invalid dietary preference.' });
     }
 
     const existingUser = await pool.query(
@@ -93,16 +105,16 @@ const register = async (req, res) => {
 
     const result = await pool.query(
       `INSERT INTO users (
-        name, email, password, username, birthday, sex,
+        name, first_name, middle_name, last_name, email, password, username, birthday, sex,
         height, weight, dietary_goal, activity_level,
-        allergens, available_equipment, bmi, tdee, otp_code, otp_expires_at, otp_purpose
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-      RETURNING id, name, email, username, dietary_goal, bmi, tdee`,
+        allergens, available_equipment, bmi, tdee, otp_code, otp_expires_at, otp_purpose, dietary_preference
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+      RETURNING id, name, first_name, middle_name, last_name, email, username, dietary_goal, bmi, tdee`,
       [
-        name, email, hashedPassword, username, birthday, sex,
+        fullName, firstName, middleName || null, lastName, email, hashedPassword, username, birthday, sex,
         height, weight, dietary_goal, activity_level,
         allergens || [], available_equipment || ['Bodyweight'],
-        bmi, tdee, otpCode, otpExpiresAt, 'registration'
+        bmi, tdee, otpCode, otpExpiresAt, 'registration', dietPref
       ]
     );
 
@@ -139,7 +151,7 @@ const verifyRegistrationOtp = async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT id, name, email, username, dietary_goal, bmi, tdee, otp_code, otp_expires_at, email_verified
+      `SELECT id, name, first_name, middle_name, last_name, email, username, dietary_goal, bmi, tdee, otp_code, otp_expires_at, email_verified
        FROM users WHERE email = $1`,
       [email]
     );
@@ -177,6 +189,9 @@ const verifyRegistrationOtp = async (req, res) => {
       user: {
         id: user.id,
         name: user.name,
+        first_name: user.first_name,
+        middle_name: user.middle_name,
+        last_name: user.last_name,
         email: user.email,
         username: user.username,
         dietary_goal: user.dietary_goal,
@@ -343,7 +358,7 @@ const login = async (req, res) => {
 const getCurrentUser = async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, name, email, username, birthday, sex, height, weight,
+      `SELECT id, name, first_name, middle_name, last_name, email, username, birthday, sex, height, weight,
               dietary_goal, activity_level, allergens, bmi, tdee, is_active, created_at
        FROM users WHERE id = $1`,
       [req.userId]

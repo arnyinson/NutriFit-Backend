@@ -1,5 +1,6 @@
 const pool = require('../config/database');
 const bcrypt = require('bcryptjs');
+const { generateAndSaveMealPlan } = require('./mealController');
 
 // Calculate BMI
 const calculateBMI = (weight, height) => {
@@ -43,8 +44,8 @@ const calculateAge = (birthday) => {
 const getMyProfile = async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, name, email, username, birthday, sex, height, weight,
-              dietary_goal, activity_level, allergens, available_equipment,
+      `SELECT id, name, first_name, middle_name, last_name, email, username, birthday, sex, height, weight,
+              dietary_goal, dietary_preference, activity_level, allergens, available_equipment,
               bmi, tdee, is_active, avatar_url, created_at
        FROM users WHERE id = $1`,
       [req.userId]
@@ -68,7 +69,26 @@ const getMyProfile = async (req, res) => {
 const updateMyProfile = async (req, res) => {
   try {
     const userId = req.userId;
-    const { name, birthday, sex, height, weight, dietary_goal, activity_level, allergens, available_equipment } = req.body;
+    const { name, first_name, middle_name, last_name, birthday, sex, height, weight, dietary_goal, activity_level, allergens, available_equipment, dietary_preference } = req.body;
+
+    const VALID_DIETS = ['None', 'Pescatarian', 'Vegetarian', 'Vegan'];
+    if (dietary_preference !== undefined && dietary_preference !== null && !VALID_DIETS.includes(dietary_preference)) {
+      return res.status(400).json({ error: 'Invalid dietary preference.' });
+    }
+
+
+    // If name parts are sent, rebuild the full name from them
+    let fullName = name || null;
+    let fn = null, mn = null, ln = null;
+    if (first_name !== undefined || last_name !== undefined || middle_name !== undefined) {
+      fn = (first_name || '').trim();
+      mn = (middle_name || '').trim();
+      ln = (last_name || '').trim();
+      if (!fn || !ln) {
+        return res.status(400).json({ error: 'First name and last name are required.' });
+      }
+      fullName = [fn, mn, ln].filter(Boolean).join(' ');
+    }
 
     let bmi, tdee;
     if (height && weight) {
@@ -84,6 +104,10 @@ const updateMyProfile = async (req, res) => {
       tdee = calculateTDEE(parseFloat(weight), parseFloat(height), age, useSex, useActivity);
     }
 
+    // Kunin ang dating diet at allergens para malaman kung kailangang i-regenerate ang meal plan
+    const beforeRes = await pool.query('SELECT dietary_preference, allergens FROM users WHERE id = $1', [userId]);
+    const before = beforeRes.rows[0] || {};
+
     const result = await pool.query(
       `UPDATE users SET
         name = COALESCE($1, name),
@@ -97,20 +121,57 @@ const updateMyProfile = async (req, res) => {
         available_equipment = COALESCE($9, available_equipment),
         bmi = COALESCE($10, bmi),
         tdee = COALESCE($11, tdee),
+        first_name = COALESCE($13::text, first_name),
+        middle_name = CASE WHEN $13::text IS NULL THEN middle_name ELSE NULLIF($14::text, '') END,
+        last_name = COALESCE($15::text, last_name),
+        dietary_preference = COALESCE($16::text, dietary_preference),
         updated_at = now()
       WHERE id = $12
-      RETURNING id, name, email, username, birthday, sex, height, weight,
-                dietary_goal, activity_level, allergens, available_equipment,
+      RETURNING id, name, first_name, middle_name, last_name, email, username, birthday, sex, height, weight,
+                dietary_goal, dietary_preference, activity_level, allergens, available_equipment,
                 bmi, tdee, avatar_url`,
-      [name, birthday, sex, height, weight, dietary_goal, activity_level, allergens,
-       available_equipment, bmi, tdee, userId]
+      [fullName, birthday, sex, height, weight, dietary_goal, activity_level, allergens,
+       available_equipment, bmi, tdee, userId, fn, mn, ln, dietary_preference || null]
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'User not found.' });
     }
 
-    res.json({ success: true, message: 'Profile updated successfully.', user: result.rows[0] });
+    // Nagbago ang diet o allergens: i-regenerate ang NALALABING araw ng meal plan.
+    // Hindi gagalawin ang mga nakaraang araw at ang mga meal na naka-taken o skipped na.
+    const dietChanged =
+      dietary_preference !== undefined && dietary_preference !== null &&
+      dietary_preference !== (before.dietary_preference || 'None');
+    const sortedKey = (arr) => [...(arr || [])].sort().join('|');
+    const allergensChanged =
+      Array.isArray(allergens) && sortedKey(allergens) !== sortedKey(before.allergens);
+
+    let planWarning = null;
+    if (dietChanged || allergensChanged) {
+      try {
+        const modesRes = await pool.query(
+          'SELECT DISTINCT mode FROM meal_plans WHERE user_id = $1 AND plan_date >= current_date()',
+          [userId]
+        );
+        const modes = modesRes.rows.length > 0 ? modesRes.rows.map((r) => r.mode) : ['weekly'];
+        for (const m of modes) {
+          await generateAndSaveMealPlan(userId, m, { keepProgress: true });
+        }
+      } catch (planErr) {
+        console.error('Plan regeneration after profile update failed:', planErr.message);
+        planWarning = planErr.statusCode === 422
+          ? 'Your preferences were saved, but no meals match them yet. Your current meal plan was kept.'
+          : 'Your preferences were saved, but your meal plan could not be updated right now.';
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Profile updated successfully.',
+      user: result.rows[0],
+      ...(planWarning ? { plan_warning: planWarning } : {}),
+    });
 
   } catch (err) {
     console.error('Update my profile error:', err.message);
@@ -162,7 +223,7 @@ const getAllUsers = async (req, res) => {
     const { search, dietary_goal, is_active, archived, banned } = req.query;
 
     let query = `
-      SELECT id, name, email, username, birthday, sex, height, weight,
+      SELECT id, name, first_name, middle_name, last_name, email, username, birthday, sex, height, weight,
              dietary_goal, activity_level, allergens, bmi, tdee, is_active,
              archived, banned, ban_reason, banned_at, last_login, avatar_url, created_at
       FROM users WHERE 1=1
@@ -217,7 +278,7 @@ const getUserDetails = async (req, res) => {
     const { id } = req.params;
 
     const userResult = await pool.query(
-      `SELECT id, name, email, username, birthday, sex, height, weight,
+      `SELECT id, name, first_name, middle_name, last_name, email, username, birthday, sex, height, weight,
               dietary_goal, activity_level, allergens, available_equipment,
               bmi, tdee, is_active, archived, banned, ban_reason, banned_at,
               last_login, created_at

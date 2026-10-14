@@ -18,8 +18,9 @@ def get_meals_from_db():
     cursor.execute("""
         SELECT id, name, category, meal_type, 
                calories, protein, carbs, fats, allergens,
-               main_ingredients, sub_ingredients
+               main_ingredients, sub_ingredients, diet_type
         FROM meals
+        WHERE COALESCE(is_active, true) = true
     """)
     rows = cursor.fetchall()
     cursor.close()
@@ -39,6 +40,8 @@ def get_meals_from_db():
             'allergens': row[8] or [],
             'main_ingredients': row[9] or [],
             'sub_ingredients': row[10] or [],
+            # NULL = hindi pa naka-classify: ituring na Omnivore (pinaka-ligtas, para sa No preference lang)
+            'diet_type': row[11] or 'Omnivore',
         })
     return meals
 
@@ -182,6 +185,33 @@ def filter_allergens(meals, user_allergens, substitute_lookup):
 
     return safe_meals
 
+# ---------------------------------------------------------------------------
+# DIETARY PREFERENCE (meal.diet_type: Omnivore / Pescatarian / Vegetarian / Vegan)
+# Hierarchy: mas mahigpit ang diet, mas kaunti ang makikitang meals.
+#   None / No preference -> lahat ng meals
+#   Pescatarian          -> Pescatarian + Vegetarian + Vegan
+#   Vegetarian           -> Vegetarian + Vegan
+#   Vegan                -> Vegan lang
+# Ang meal na walang diet_type (NULL) ay hindi lalabas sa kahit anong restricted diet.
+# ---------------------------------------------------------------------------
+DIET_ALLOWED = {
+    'Pescatarian': {'Pescatarian', 'Vegetarian', 'Vegan'},
+    'Vegetarian': {'Vegetarian', 'Vegan'},
+    'Vegan': {'Vegan'},
+}
+
+def normalize_diet(preference):
+    if not preference:
+        return 'None'
+    pref = str(preference).strip().capitalize()
+    return pref if pref in DIET_ALLOWED else 'None'
+
+def filter_by_diet(meals, preference):
+    allowed = DIET_ALLOWED.get(normalize_diet(preference))
+    if allowed is None:
+        return meals
+    return [m for m in meals if m.get('diet_type') in allowed]
+
 def recommend_meals(user_profile, mode='weekly'):
     all_meals = get_meals_from_db()
     substitute_lookup = get_allergen_substitutes_from_db()
@@ -198,13 +228,32 @@ def recommend_meals(user_profile, mode='weekly'):
     target_calories = calculate_target_calories(tdee, user_profile['dietary_goal'], calorie_adjustment)
     macro_targets = calculate_macro_targets(target_calories, user_profile['dietary_goal'])
 
-    safe_meals = filter_allergens(all_meals, user_profile.get('allergens', []), substitute_lookup)
+    dietary_preference = normalize_diet(user_profile.get('dietary_preference'))
+    diet_meals = filter_by_diet(all_meals, dietary_preference)
+    safe_meals = filter_allergens(diet_meals, user_profile.get('allergens', []), substitute_lookup)
+
+    warnings = []
     if not safe_meals:
-        safe_meals = all_meals
+        # HUWAG nang mag-fallback sa lahat ng meals: ang ligtas na resulta ay walang plan,
+        # hindi plan na may allergen o labag sa diet.
+        return {
+            'meal_plan': [],
+            'tdee': tdee,
+            'target_calories': target_calories,
+            'macro_targets': macro_targets,
+            'mode': mode,
+            'days': 0,
+            'dietary_preference': dietary_preference,
+            'warnings': ['No meals match your dietary preference and allergens.'],
+        }
 
     breakfast_meals = [m for m in safe_meals if m['meal_type'] == 'Breakfast']
     lunch_meals = [m for m in safe_meals if m['meal_type'] == 'Lunch']
     dinner_meals = [m for m in safe_meals if m['meal_type'] == 'Dinner']
+
+    for label, group in (('Breakfast', breakfast_meals), ('Lunch', lunch_meals), ('Dinner', dinner_meals)):
+        if not group:
+            warnings.append(f'No {label} meals match your dietary preference and allergens.')
 
     features = ['calories', 'protein', 'carbs', 'fats']
     all_df = pd.DataFrame(safe_meals)
@@ -312,14 +361,19 @@ def recommend_meals(user_profile, mode='weekly'):
         'target_calories': target_calories,
         'macro_targets': macro_targets,
         'mode': mode,
-        'days': days_to_generate
+        'days': days_to_generate,
+        'dietary_preference': dietary_preference,
+        'warnings': warnings,
     }
+
+
 def get_exercises_from_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
         SELECT id, name, muscle_group, equipment, difficulty, instructions
         FROM exercises
+        WHERE COALESCE(is_active, true) = true
     """)
     rows = cursor.fetchall()
     cursor.close()

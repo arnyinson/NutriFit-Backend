@@ -149,9 +149,11 @@ const applyGradualCalorieAdjustment = async (userId) => {
 // ============================================
 // SHARED: Generate + Save Meal Plan
 // ============================================
-const generateAndSaveMealPlan = async (userId, mode) => {
+// options.keepProgress = true: huwag galawin ang mga nakaraang araw at ang mga meal na taken o skipped na
+// (ginagamit kapag nagbago ang diet o allergens sa gitna ng linggo)
+const generateAndSaveMealPlan = async (userId, mode, options = {}) => {
   const userResult = await pool.query(
-    `SELECT birthday, sex, height, weight, dietary_goal, activity_level, allergens, calorie_adjustment
+    `SELECT birthday, sex, height, weight, dietary_goal, activity_level, allergens, calorie_adjustment, dietary_preference
      FROM users WHERE id = $1`,
     [userId]
   );
@@ -182,18 +184,46 @@ const generateAndSaveMealPlan = async (userId, mode) => {
     allergens: user.allergens || [],
     mode: mode || 'weekly',
     calorie_adjustment: parseInt(user.calorie_adjustment, 10) || 0,
+    dietary_preference: user.dietary_preference || 'None',
   });
 
-  const { meal_plan, tdee, target_calories, macro_targets } = mlResponse.data.data;
+  const { meal_plan, tdee, target_calories, macro_targets, warnings } = mlResponse.data.data;
+
+  // Walang ligtas na meals para sa diet at allergens ng user: huwag burahin ang
+  // kasalukuyang plan, itigil na lang dito at ipaalam sa user.
+  if (!meal_plan || meal_plan.length === 0) {
+    const error = new Error((warnings && warnings[0]) || 'No meals match your dietary preference and allergens.');
+    error.statusCode = 422;
+    throw error;
+  }
   const weekStart = formatLocalDate(monday);
 
   // Tinatanggal lang ang NAKARAANG DATOS PARA SA KASALUKUYANG LINGGO — hindi
   // dapat mabura ang mga nakaraang linggo, para makita pa rin ito ng user sa
   // Calendar screen bilang "previous plan" (kailangan ito ayon sa paper)
-  await pool.query(
-    'DELETE FROM meal_plans WHERE user_id = $1 AND mode = $2 AND week_start = $3',
-    [userId, mode || 'weekly', weekStart]
-  );
+  const keepProgress = options.keepProgress === true;
+  const todayStr = formatLocalDate(today);
+  const keptSlots = new Set();
+
+  if (keepProgress) {
+    await pool.query(
+      `DELETE FROM meal_plans
+       WHERE user_id = $1 AND mode = $2 AND week_start = $3
+         AND plan_date >= $4
+         AND COALESCE(taken, false) = false AND COALESCE(skipped, false) = false`,
+      [userId, mode || 'weekly', weekStart, todayStr]
+    );
+    const keptRes = await pool.query(
+      'SELECT plan_date, meal_type FROM meal_plans WHERE user_id = $1 AND mode = $2 AND week_start = $3',
+      [userId, mode || 'weekly', weekStart]
+    );
+    keptRes.rows.forEach((r) => keptSlots.add(`${formatLocalDate(new Date(r.plan_date))}|${r.meal_type}`));
+  } else {
+    await pool.query(
+      'DELETE FROM meal_plans WHERE user_id = $1 AND mode = $2 AND week_start = $3',
+      [userId, mode || 'weekly', weekStart]
+    );
+  }
 
   for (const day of meal_plan) {
     if (day.is_rest) continue;
@@ -208,17 +238,22 @@ const generateAndSaveMealPlan = async (userId, mode) => {
       if (!slot.meal) continue;
 
       const planDate = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + (day.day_number - 1));
+      const planDateStr = formatLocalDate(planDate);
+
+      if (keepProgress && (planDateStr < todayStr || keptSlots.has(`${planDateStr}|${slot.type}`))) {
+        continue;
+      }
 
       await pool.query(
         `INSERT INTO meal_plans (
           user_id, meal_id, day, meal_type, week_start, mode, plan_date, taken
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, false)`,
-        [userId, slot.meal.id, day.day, slot.type, weekStart, mode || 'weekly', formatLocalDate(planDate)]
+        [userId, slot.meal.id, day.day, slot.type, weekStart, mode || 'weekly', planDateStr]
       );
     }
   }
 
-  return { meal_plan, tdee, target_calories, macro_targets, mode: mode || 'weekly' };
+  return { meal_plan, tdee, target_calories, macro_targets, mode: mode || 'weekly', warnings: warnings || [] };
 };
 
 // ============================================
@@ -280,6 +315,24 @@ const applyAllergenFilterToMeals = async (meals, userAllergens) => {
 };
 
 // ============================================
+// DIETARY PREFERENCE (meal.diet_type: Omnivore / Pescatarian / Vegetarian / Vegan)
+// None = lahat; Pescatarian = Pescatarian+Vegetarian+Vegan; Vegetarian = Vegetarian+Vegan;
+// Vegan = Vegan lang. Ang meal na walang diet_type ay hindi lalabas sa restricted diet.
+// ============================================
+const DIET_TYPES = ['Omnivore', 'Pescatarian', 'Vegetarian', 'Vegan'];
+const DIET_ALLOWED = {
+  Pescatarian: ['Pescatarian', 'Vegetarian', 'Vegan'],
+  Vegetarian: ['Vegetarian', 'Vegan'],
+  Vegan: ['Vegan'],
+};
+
+const applyDietFilterToMeals = (meals, preference) => {
+  const allowed = DIET_ALLOWED[preference];
+  if (!allowed) return meals; // None / walang preference
+  return meals.filter((meal) => allowed.includes(meal.diet_type));
+};
+
+// ============================================
 // GET ALL MEALS (for admin / meal database browsing, AND mobile app meal search)
 // If the request is authenticated (has req.userId), allergen-containing meals are
 // automatically filtered out per the 3-tier logic — they never appear in search
@@ -316,8 +369,10 @@ const getAllMeals = async (req, res) => {
 
     // If this request came from a logged-in mobile user, filter by their allergens
     if (req.userId) {
-      const userResult = await pool.query('SELECT allergens FROM users WHERE id = $1', [req.userId]);
+      const userResult = await pool.query('SELECT allergens, dietary_preference FROM users WHERE id = $1', [req.userId]);
       const userAllergens = userResult.rows[0]?.allergens || [];
+      const userDiet = userResult.rows[0]?.dietary_preference || 'None';
+      meals = applyDietFilterToMeals(meals, userDiet);
       meals = await applyAllergenFilterToMeals(meals, userAllergens);
     }
 
@@ -356,25 +411,32 @@ const createMeal = async (req, res) => {
     const {
       name, category, meal_type, calories, protein, carbs, fats,
       allergens, ingredients, instructions, image_url,
-      main_ingredients, sub_ingredients
+      main_ingredients, sub_ingredients, diet_type
     } = req.body;
 
     if (!name || !meal_type || !calories) {
       return res.status(400).json({ error: 'Name, meal type, and calories are required.' });
     }
 
+    // Kapag walang diet_type, Omnivore ang default (pinakamahigpit sa visibility: para sa No preference lang)
+    const mealDietType = diet_type || 'Omnivore';
+    if (!DIET_TYPES.includes(mealDietType)) {
+      return res.status(400).json({ error: `diet_type must be one of: ${DIET_TYPES.join(', ')}.` });
+    }
+
     const result = await pool.query(
       `INSERT INTO meals (
         name, category, meal_type, calories, protein, carbs, fats,
         allergens, ingredients, instructions, image_url,
-        main_ingredients, sub_ingredients
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        main_ingredients, sub_ingredients, diet_type
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
       RETURNING *`,
       [
         name, category || null, meal_type, calories,
         protein || 0, carbs || 0, fats || 0,
         allergens || [], ingredients || [], instructions || '', image_url || null,
-        JSON.stringify(main_ingredients || []), JSON.stringify(sub_ingredients || [])
+        JSON.stringify(main_ingredients || []), JSON.stringify(sub_ingredients || []),
+        mealDietType
       ]
     );
 
@@ -394,8 +456,21 @@ const updateMeal = async (req, res) => {
     const { id } = req.params;
     const {
       name, category, meal_type, calories, protein, carbs, fats,
-      allergens, ingredients, instructions, image_url, is_active
+      allergens, ingredients, instructions, image_url, is_active,
+      diet_type, main_ingredients, sub_ingredients
     } = req.body;
+
+    if (diet_type && !DIET_TYPES.includes(diet_type)) {
+      return res.status(400).json({ error: `diet_type must be one of: ${DIET_TYPES.join(', ')}.` });
+    }
+
+    // Ang tiers (main/sub) ay ina-update lang kapag may totoong laman na ipinadala.
+    // Ang walang laman o walang ipinadala ay hindi gagalaw, para hindi aksidenteng
+    // mabura ang allergen protection ng meal.
+    const mainJson = Array.isArray(main_ingredients) && main_ingredients.length > 0
+      ? JSON.stringify(main_ingredients) : null;
+    const subJson = Array.isArray(sub_ingredients) && sub_ingredients.length > 0
+      ? JSON.stringify(sub_ingredients) : null;
 
     const result = await pool.query(
       `UPDATE meals SET
@@ -411,11 +486,15 @@ const updateMeal = async (req, res) => {
         instructions = COALESCE($10, instructions),
         image_url = COALESCE($11, image_url),
         is_active = COALESCE($12, is_active),
+        diet_type = COALESCE($13, diet_type),
+        main_ingredients = COALESCE($14::jsonb, main_ingredients),
+        sub_ingredients = COALESCE($15::jsonb, sub_ingredients),
         updated_at = now()
-      WHERE id = $13
+      WHERE id = $16
       RETURNING *`,
       [name, category, meal_type, calories, protein, carbs, fats,
-       allergens, ingredients, instructions, image_url, is_active, id]
+       allergens, ingredients, instructions, image_url, is_active,
+       diet_type || null, mainJson, subJson, id]
     );
 
     if (result.rows.length === 0) {
@@ -472,6 +551,9 @@ const generateMealPlan = async (req, res) => {
     console.error('ML API status:', err.response?.status);
     if (err.statusCode === 404) {
       return res.status(404).json({ error: err.message });
+    }
+    if (err.statusCode === 422) {
+      return res.status(422).json({ error: err.message });
     }
     if (err.code === 'ECONNREFUSED') {
       return res.status(503).json({ error: 'AI recommendation service is unavailable. Please try again later.' });
@@ -773,6 +855,7 @@ module.exports = {
   updateMeal,
   deleteMeal,
   generateMealPlan,
+  generateAndSaveMealPlan,
   getMyMealPlan,
   toggleMealStatus,
   replaceMealInPlan,
