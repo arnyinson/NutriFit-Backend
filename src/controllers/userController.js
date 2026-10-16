@@ -224,7 +224,7 @@ const getAllUsers = async (req, res) => {
 
     let query = `
       SELECT id, name, first_name, middle_name, last_name, email, username, birthday, sex, height, weight,
-             dietary_goal, activity_level, allergens, bmi, tdee, is_active,
+             dietary_goal, dietary_preference, activity_level, allergens, bmi, tdee, is_active,
              archived, banned, ban_reason, banned_at, last_login, avatar_url, created_at
       FROM users WHERE 1=1
     `;
@@ -279,7 +279,7 @@ const getUserDetails = async (req, res) => {
 
     const userResult = await pool.query(
       `SELECT id, name, first_name, middle_name, last_name, email, username, birthday, sex, height, weight,
-              dietary_goal, activity_level, allergens, available_equipment,
+              dietary_goal, dietary_preference, activity_level, allergens, available_equipment,
               bmi, tdee, is_active, archived, banned, ban_reason, banned_at,
               last_login, created_at
        FROM users WHERE id = $1`,
