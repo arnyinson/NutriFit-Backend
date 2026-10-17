@@ -40,7 +40,7 @@ def get_meals_from_db():
             'allergens': row[8] or [],
             'main_ingredients': row[9] or [],
             'sub_ingredients': row[10] or [],
-            # NULL = hindi pa naka-classify: ituring na Omnivore (pinaka-ligtas, para sa No preference lang)
+            # No diet_type is treated as Omnivore (safest, shown only to No preference)
             'diet_type': row[11] or 'Omnivore',
         })
     return meals
@@ -79,9 +79,8 @@ def calculate_tdee(weight, height, age, sex, activity_level):
     return round(bmr * multiplier)
 
 def calculate_target_calories(tdee, dietary_goal, calorie_adjustment=0):
-    # Base on nutritionist validation: fixed na kcal adjustment (300-500 kcal range),
-    # PLUS ang gradual adjustment (adaptive feedback loop base sa totoong weekly
-    # weight progress ng user, tingnan ang mealController.js applyGradualCalorieAdjustment)
+    # Based on nutritionist validation: fixed 400 kcal adjustment,
+    # plus the gradual weekly adjustment (see mealController.js)
     if dietary_goal == 'Cutting':
         base = tdee - 400
     elif dietary_goal == 'Bulking':
@@ -90,14 +89,11 @@ def calculate_target_calories(tdee, dietary_goal, calorie_adjustment=0):
         base = tdee
 
     adjusted = base + (calorie_adjustment or 0)
-    # Safety floor — huwag kailanman bumaba sa 1200 kcal, kahit ano pa ang adjustment
+    # Safety floor: never go below 1200 kcal
     return round(max(adjusted, 1200))
 
 def calculate_macro_targets(target_calories, dietary_goal):
-    # Base on nutritionist validation
-    # Cutting: Protein 35-40%, Carbs 30-35%, Fats 25-30%
-    # Bulking: Protein 25-30%, Carbs 45-50%, Fats 20-25%
-    # Maintenance: Protein 10-15%, Carbs 55-75%, Fats 15-30%
+    # Based on nutritionist validation (percent of calories)
     if dietary_goal == 'Cutting':
         protein_pct = 0.375
         carbs_pct = 0.325
@@ -106,7 +102,7 @@ def calculate_macro_targets(target_calories, dietary_goal):
         protein_pct = 0.275
         carbs_pct = 0.475
         fats_pct = 0.25
-    else:  # Maintenance
+    else:
         protein_pct = 0.125
         carbs_pct = 0.65
         fats_pct = 0.225
@@ -137,15 +133,15 @@ def filter_allergens(meals, user_allergens, substitute_lookup):
         main_ingredients = meal.get('main_ingredients', [])
         sub_ingredients = meal.get('sub_ingredients', [])
 
-        # Tier 1: main ingredient allergen check -> automatic exclusion, no substitute
+        # Tier 1: main ingredient allergen -> exclude the meal
         main_has_allergen = any(
             any(a in user_allergens for a in ing.get('allergens', []))
             for ing in main_ingredients
         )
         if main_has_allergen:
-            continue  # excluded, move to the next meal
+            continue
 
-        # Tier 2 & 3: sub ingredient allergen check -> try to substitute
+        # Tier 2 and 3: sub ingredient allergens -> substitute or exclude
         substitutions_made = []
         meal_is_safe = True
 
@@ -153,9 +149,8 @@ def filter_allergens(meals, user_allergens, substitute_lookup):
             ing_allergens = ing.get('allergens', [])
             triggered = [a for a in ing_allergens if a in user_allergens]
             if not triggered:
-                continue  # this sub ingredient is fine, no allergen match
+                continue
 
-            # Try a meal-specific override substitute first, then the default lookup table
             substitute_name = ing.get('substitute_override')
             if not substitute_name:
                 for allergen in triggered:
@@ -164,36 +159,30 @@ def filter_allergens(meals, user_allergens, substitute_lookup):
                         break
 
             if substitute_name:
-                # Tier 2: safe substitute exists, replace and keep the meal
+                # Tier 2: substitute found, keep the meal
                 substitutions_made.append({
                     'original': ing['name'],
                     'substitute': substitute_name,
                     'allergen': triggered[0],
                 })
             else:
-                # Tier 3: no substitute available, exclude the meal
+                # Tier 3: no substitute, exclude the meal
                 meal_is_safe = False
                 break
 
         if not meal_is_safe:
             continue
 
-        # Attach substitution info (empty list if nothing needed replacing)
         meal_copy = dict(meal)
         meal_copy['allergen_substitutions'] = substitutions_made
         safe_meals.append(meal_copy)
 
     return safe_meals
 
-# ---------------------------------------------------------------------------
-# DIETARY PREFERENCE (meal.diet_type: Omnivore / Pescatarian / Vegetarian / Vegan)
-# Hierarchy: mas mahigpit ang diet, mas kaunti ang makikitang meals.
-#   None / No preference -> lahat ng meals
-#   Pescatarian          -> Pescatarian + Vegetarian + Vegan
-#   Vegetarian           -> Vegetarian + Vegan
-#   Vegan                -> Vegan lang
-# Ang meal na walang diet_type (NULL) ay hindi lalabas sa kahit anong restricted diet.
-# ---------------------------------------------------------------------------
+# Dietary preference (meal.diet_type). Stricter diet = fewer meals:
+#   None -> all meals, Pescatarian -> Pescatarian + Vegetarian + Vegan,
+#   Vegetarian -> Vegetarian + Vegan, Vegan -> Vegan only.
+# Meals without a diet_type are treated as Omnivore.
 DIET_ALLOWED = {
     'Pescatarian': {'Pescatarian', 'Vegetarian', 'Vegan'},
     'Vegetarian': {'Vegetarian', 'Vegan'},
@@ -234,8 +223,7 @@ def recommend_meals(user_profile, mode='weekly'):
 
     warnings = []
     if not safe_meals:
-        # HUWAG nang mag-fallback sa lahat ng meals: ang ligtas na resulta ay walang plan,
-        # hindi plan na may allergen o labag sa diet.
+        # No fallback to all meals: return no plan rather than an unsafe one.
         return {
             'meal_plan': [],
             'tdee': tdee,
@@ -425,10 +413,8 @@ def filter_by_equipment(exercises, available_equipment):
     return [e for e in exercises if e['equipment'] in available_equipment]
 
 
-# Sets/Reps scheme base sa dietary goal AT difficulty — tumutugma sa periodization
-# principles: Cutting = mas maraming reps/volume (calorie burn, panatilihin ang
-# muscle), Bulking = mas kaunting reps/mas maraming sets (strength/hypertrophy),
-# Maintenance = balanced default
+# Sets and reps depend on the dietary goal and difficulty:
+# Cutting = more reps, Bulking = fewer reps and more sets, Maintenance = balanced.
 SETS_REPS_SCHEME = {
     'Cutting': {
         'Beginner': (3, '15 reps'),
@@ -450,6 +436,15 @@ SETS_REPS_SCHEME = {
 def get_sets_reps(difficulty, dietary_goal):
     goal_scheme = SETS_REPS_SCHEME.get(dietary_goal, SETS_REPS_SCHEME['Maintenance'])
     return goal_scheme.get(difficulty, goal_scheme['Beginner'])
+
+
+# If a muscle group has no exercise for the user's equipment (e.g. no bodyweight Biceps),
+# borrow from a related group so the day is not left empty.
+FALLBACK_GROUPS = {
+    'Biceps': ['Back'],
+    'Triceps': ['Chest', 'Shoulders'],
+    'Calves': ['Legs'],
+}
 
 
 def recommend_workout(user_profile, mode='weekly'):
@@ -487,6 +482,17 @@ def recommend_workout(user_profile, mode='weekly'):
         day_exercises = []
         for muscle_group in day_template['muscle_groups']:
             group_exercises = [e for e in filtered if e['muscle_group'] == muscle_group]
+            borrowed = False
+
+            if not group_exercises:
+                # No exercise for this group: borrow from a related group (no repeats in the same day)
+                day_ids = {d['id'] for d in day_exercises}
+                group_exercises = [
+                    e for g in FALLBACK_GROUPS.get(muscle_group, [])
+                    for e in filtered
+                    if e['muscle_group'] == g and e['id'] not in day_ids
+                ]
+                borrowed = True
 
             if not group_exercises:
                 continue
@@ -498,7 +504,7 @@ def recommend_workout(user_profile, mode='weekly'):
                 used_exercise_ids[muscle_group] = set()
                 available = group_exercises
 
-            num_to_pick = min(3, len(available))
+            num_to_pick = min(2 if borrowed else 3, len(available))
             picked = available[:num_to_pick]
 
             for ex in picked:
