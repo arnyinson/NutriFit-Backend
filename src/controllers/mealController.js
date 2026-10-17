@@ -774,18 +774,47 @@ const replaceMealInPlan = async (req, res) => {
 const logFood = async (req, res) => {
   try {
     const userId = req.userId;
-    const { food_name, calories, protein, carbs, fats, weight_grams } = req.body;
+    const { food_name, calories, protein, carbs, fats, weight_grams, client_id } = req.body;
 
     if (!food_name || !calories) {
       return res.status(400).json({ error: 'Food name and calories are required.' });
     }
 
-    const result = await pool.query(
-      `INSERT INTO food_logs (user_id, food_name, calories, protein, carbs, fats, weight_grams)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING *`,
-      [userId, food_name, calories, protein || 0, carbs || 0, fats || 0, weight_grams || null]
-    );
+    // client_id is made by the phone for each log. If the same log arrives twice
+    // (weak connection, offline queue retry), the second one is ignored.
+    const cid = client_id ? String(client_id).slice(0, 64) : null;
+    const findExisting = async () => {
+      const ex = await pool.query(
+        'SELECT * FROM food_logs WHERE user_id = $1 AND client_id = $2 LIMIT 1',
+        [userId, cid]
+      );
+      return ex.rows[0] || null;
+    };
+    if (cid) {
+      const existing = await findExisting();
+      if (existing) {
+        return res.status(200).json({ success: true, message: 'Food already logged.', foodLog: existing, duplicate: true });
+      }
+    }
+
+    let result;
+    try {
+      result = await pool.query(
+        `INSERT INTO food_logs (user_id, food_name, calories, protein, carbs, fats, weight_grams, client_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING *`,
+        [userId, food_name, calories, protein || 0, carbs || 0, fats || 0, weight_grams || null, cid]
+      );
+    } catch (insertErr) {
+      // two copies of the same log arrived at the same moment: keep the first
+      if (cid && insertErr.code === '23505') {
+        const existing = await findExisting();
+        if (existing) {
+          return res.status(200).json({ success: true, message: 'Food already logged.', foodLog: existing, duplicate: true });
+        }
+      }
+      throw insertErr;
+    }
 
     res.status(201).json({ success: true, message: 'Food logged successfully.', foodLog: result.rows[0] });
 

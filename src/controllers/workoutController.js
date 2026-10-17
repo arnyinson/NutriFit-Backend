@@ -448,18 +448,45 @@ const toggleExerciseDone = async (req, res) => {
 const logWorkout = async (req, res) => {
   try {
     const userId = req.userId;
-    const { exercise_id, sets_completed, reps_completed, weight_used } = req.body;
+    const { exercise_id, sets_completed, reps_completed, weight_used, client_id } = req.body;
 
     if (!exercise_id) {
       return res.status(400).json({ error: 'exercise_id is required.' });
     }
 
-    const result = await pool.query(
-      `INSERT INTO workout_logs (user_id, exercise_id, sets_completed, reps_completed, weight_used)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING *`,
-      [userId, exercise_id, sets_completed || null, reps_completed || null, weight_used || null]
-    );
+    // client_id is made by the phone for each log; the same log sent twice is ignored
+    const cid = client_id ? String(client_id).slice(0, 64) : null;
+    const findExisting = async () => {
+      const ex = await pool.query(
+        'SELECT * FROM workout_logs WHERE user_id = $1 AND client_id = $2 LIMIT 1',
+        [userId, cid]
+      );
+      return ex.rows[0] || null;
+    };
+    if (cid) {
+      const existing = await findExisting();
+      if (existing) {
+        return res.status(200).json({ success: true, message: 'Workout already logged.', workoutLog: existing, duplicate: true });
+      }
+    }
+
+    let result;
+    try {
+      result = await pool.query(
+        `INSERT INTO workout_logs (user_id, exercise_id, sets_completed, reps_completed, weight_used, client_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING *`,
+        [userId, exercise_id, sets_completed || null, reps_completed || null, weight_used || null, cid]
+      );
+    } catch (insertErr) {
+      if (cid && insertErr.code === '23505') {
+        const existing = await findExisting();
+        if (existing) {
+          return res.status(200).json({ success: true, message: 'Workout already logged.', workoutLog: existing, duplicate: true });
+        }
+      }
+      throw insertErr;
+    }
 
     res.status(201).json({ success: true, message: 'Workout logged successfully.', workoutLog: result.rows[0] });
 
@@ -589,7 +616,7 @@ const getExerciseVideoImage = async (req, res) => {
 const addCustomWorkoutEntry = async (req, res) => {
   try {
     const userId = req.userId;
-    const { day, exercise_id, custom_exercise_name, sets, reps, weight_used } = req.body;
+    const { day, exercise_id, custom_exercise_name, sets, reps, weight_used, client_id } = req.body;
 
     // Kailangan alinman sa dalawa: totoong exercise_id (mula sa search) O
     // custom_exercise_name (manual na pangalan) — hindi pwedeng wala parehong
@@ -600,13 +627,40 @@ const addCustomWorkoutEntry = async (req, res) => {
     const { monday } = getCurrentWeekMonday();
     const weekStart = formatLocalDate(monday);
 
-    const result = await pool.query(
-      `INSERT INTO workout_plans (
-        user_id, exercise_id, custom_exercise_name, day, week_start, sets, reps, done, is_custom
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, true, true)
-      RETURNING id`,
-      [userId, exercise_id || null, custom_exercise_name || null, day, weekStart, sets, reps]
-    );
+    // client_id is made by the phone; the same entry sent twice is ignored
+    const cid = client_id ? String(client_id).slice(0, 64) : null;
+    const findExisting = async () => {
+      const ex = await pool.query(
+        'SELECT id FROM workout_plans WHERE user_id = $1 AND client_id = $2 LIMIT 1',
+        [userId, cid]
+      );
+      return ex.rows[0] || null;
+    };
+    if (cid) {
+      const existing = await findExisting();
+      if (existing) {
+        return res.status(200).json({ success: true, message: 'Workout already added.', planId: existing.id, duplicate: true });
+      }
+    }
+
+    let result;
+    try {
+      result = await pool.query(
+        `INSERT INTO workout_plans (
+          user_id, exercise_id, custom_exercise_name, day, week_start, sets, reps, done, is_custom, client_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, true, true, $8)
+        RETURNING id`,
+        [userId, exercise_id || null, custom_exercise_name || null, day, weekStart, sets, reps, cid]
+      );
+    } catch (insertErr) {
+      if (cid && insertErr.code === '23505') {
+        const existing = await findExisting();
+        if (existing) {
+          return res.status(200).json({ success: true, message: 'Workout already added.', planId: existing.id, duplicate: true });
+        }
+      }
+      throw insertErr;
+    }
 
     // I-log din sa workout_logs para consistent sa ibang logging features
     await pool.query(
