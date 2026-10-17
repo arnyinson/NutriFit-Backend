@@ -340,7 +340,7 @@ const getMyWorkoutPlan = async (req, res) => {
 
     // I-check kung may existing plan para sa kasalukuyang linggo
      const existingCheck = await pool.query(
-      `SELECT week_start FROM workout_plans WHERE user_id = $1 AND week_start = $2 LIMIT 1`,
+      `SELECT week_start FROM workout_plans WHERE user_id = $1 AND week_start = $2 AND COALESCE(is_custom, false) = false LIMIT 1`,
       [userId, currentWeekStart]
     );
 
