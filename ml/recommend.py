@@ -480,6 +480,8 @@ def recommend_workout(user_profile, mode='weekly'):
             continue
 
         day_exercises = []
+        # Max 6 exercises per day: 3 per group for 2 groups, 2 per group for 3 groups
+        per_group = 3 if len(day_template['muscle_groups']) <= 2 else 2
         for muscle_group in day_template['muscle_groups']:
             group_exercises = [e for e in filtered if e['muscle_group'] == muscle_group]
             borrowed = False
@@ -504,7 +506,7 @@ def recommend_workout(user_profile, mode='weekly'):
                 used_exercise_ids[muscle_group] = set()
                 available = group_exercises
 
-            num_to_pick = min(2 if borrowed else 3, len(available))
+            num_to_pick = min(2 if borrowed else per_group, len(available))
             picked = available[:num_to_pick]
 
             for ex in picked:
