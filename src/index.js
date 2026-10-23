@@ -1,4 +1,5 @@
 const express = require('express');
+const http = require('http');
 const cors = require('cors');
 require('dotenv').config();
 require('./config/database');
@@ -16,6 +17,7 @@ const { initMealReminders } = require('./config/mealReminders');
 const { initWorkoutReminders } = require('./config/workoutReminders');
 const { initAutoArchive } = require('./config/autoArchive');
 const { initProgressReminders } = require('./config/progressReminders');
+const { initSocket } = require('./config/socket');
 
 const app = express();
 
@@ -38,12 +40,16 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/achievements', achievementRoutes);
 app.use('/api/upload', uploadRoutes);
 
-
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+
+// Plain HTTP server so Socket.IO (live updates) shares the same port as the API
+const server = http.createServer(app);
+initSocket(server);
+
+server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   initMealReminders();
   initWorkoutReminders();
   initAutoArchive();
   initProgressReminders();
-});;
+});

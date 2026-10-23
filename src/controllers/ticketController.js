@@ -1,5 +1,6 @@
 const pool = require('../config/database');
 const { notifyUser } = require('../config/pushNotifications');
+const { emitToAdmins, emitToUser } = require('../config/socket');
 
 // ============================================
 // SUBMIT TICKET (User)
@@ -19,6 +20,9 @@ const submitTicket = async (req, res) => {
        RETURNING *`,
       [userId, type || 'Other', message, image_url || null]
     );
+
+    // Live update: the admin Feedback page shows the new ticket right away
+    emitToAdmins('tickets:changed', { ticket_id: result.rows[0].id, reason: 'new' });
 
     res.status(201).json({ success: true, message: 'Feedback submitted successfully!', ticket: result.rows[0] });
 
@@ -146,6 +150,10 @@ const respondToTicket = async (req, res) => {
     const { id } = req.params;
     const { admin_response, status } = req.body;
 
+    // Previous reply, so the user is only notified when the reply really changed
+    const prev = await pool.query('SELECT admin_response FROM tickets WHERE id = $1', [id]);
+    const previousResponse = prev.rows[0]?.admin_response || '';
+
     // responded_at is only refreshed when the reply text actually changes
     const result = await pool.query(
       `UPDATE tickets SET
@@ -170,7 +178,8 @@ const respondToTicket = async (req, res) => {
 
     // Save to DB (in-app Notifications screen) AND send push when there is a reply.
     // type 'ticket' + ticket_id lets the mobile app open the conversation on tap.
-    if (admin_response && admin_response.trim() && ticket.user_id) {
+    const replyChanged = !!admin_response && admin_response.trim() !== '' && admin_response !== previousResponse;
+    if (replyChanged && ticket.user_id) {
       try {
         const userResult = await pool.query('SELECT push_token FROM users WHERE id = $1', [ticket.user_id]);
         const pushToken = userResult.rows[0]?.push_token;
@@ -186,6 +195,10 @@ const respondToTicket = async (req, res) => {
         console.error('Notify user error (non-fatal):', notifyErr.message);
       }
     }
+
+    // Live update for the ticket owner (mobile History) and every open admin page
+    if (ticket.user_id) emitToUser(ticket.user_id, 'tickets:changed', { ticket_id: ticket.id, reason: 'respond' });
+    emitToAdmins('tickets:changed', { ticket_id: ticket.id, reason: 'respond' });
 
     res.json({ success: true, message: 'Ticket updated successfully.', ticket });
 
@@ -216,7 +229,11 @@ const updateTicketStatus = async (req, res) => {
       return res.status(404).json({ error: 'Ticket not found.' });
     }
 
-    res.json({ success: true, message: 'Ticket status updated.', ticket: result.rows[0] });
+    const updated = result.rows[0];
+    if (updated.user_id) emitToUser(updated.user_id, 'tickets:changed', { ticket_id: updated.id, reason: 'status' });
+    emitToAdmins('tickets:changed', { ticket_id: updated.id, reason: 'status' });
+
+    res.json({ success: true, message: 'Ticket status updated.', ticket: updated });
 
   } catch (err) {
     console.error('Update ticket status error:', err.message);
