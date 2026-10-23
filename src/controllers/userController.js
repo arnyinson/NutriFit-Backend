@@ -1,6 +1,10 @@
 const pool = require('../config/database');
 const bcrypt = require('bcryptjs');
 const { generateAndSaveMealPlan } = require('./mealController');
+const { generateAndSaveWorkoutPlan } = require('./workoutController');
+
+// Names may only contain letters (any language), spaces, apostrophes, periods and hyphens.
+const isValidPersonName = (v) => /^[\p{L}][\p{L}\s.'-]*$/u.test(v);
 
 // Calculate BMI
 const calculateBMI = (weight, height) => {
@@ -87,6 +91,9 @@ const updateMyProfile = async (req, res) => {
       if (!fn || !ln) {
         return res.status(400).json({ error: 'First name and last name are required.' });
       }
+      if (!isValidPersonName(fn) || !isValidPersonName(ln) || (mn && !isValidPersonName(mn))) {
+        return res.status(400).json({ error: 'Names can only contain letters, spaces, apostrophes, periods and hyphens (no numbers).' });
+      }
       fullName = [fn, mn, ln].filter(Boolean).join(' ');
     }
 
@@ -105,7 +112,7 @@ const updateMyProfile = async (req, res) => {
     }
 
     // Kunin ang dating diet at allergens para malaman kung kailangang i-regenerate ang meal plan
-    const beforeRes = await pool.query('SELECT dietary_preference, allergens FROM users WHERE id = $1', [userId]);
+    const beforeRes = await pool.query('SELECT dietary_preference, allergens, dietary_goal, activity_level, available_equipment, workout_experience_level FROM users WHERE id = $1', [userId]);
     const before = beforeRes.rows[0] || {};
 
     const result = await pool.query(
@@ -147,8 +154,16 @@ const updateMyProfile = async (req, res) => {
     const allergensChanged =
       Array.isArray(allergens) && sortedKey(allergens) !== sortedKey(before.allergens);
 
+    const goalChanged =
+      dietary_goal !== undefined && dietary_goal !== null && dietary_goal !== before.dietary_goal;
+    const activityChanged =
+      activity_level !== undefined && activity_level !== null && activity_level !== before.activity_level;
+    const equipmentChanged =
+      Array.isArray(available_equipment) && sortedKey(available_equipment) !== sortedKey(before.available_equipment);
+
+    // Meal plan depends on diet, allergens, goal and activity level (TDEE)
     let planWarning = null;
-    if (dietChanged || allergensChanged) {
+    if (dietChanged || allergensChanged || goalChanged || activityChanged) {
       try {
         const modesRes = await pool.query(
           'SELECT DISTINCT mode FROM meal_plans WHERE user_id = $1 AND plan_date >= current_date()',
@@ -166,11 +181,30 @@ const updateMyProfile = async (req, res) => {
       }
     }
 
+    // Workout plan depends on the dietary goal and the available equipment.
+    // Only today and the coming days are rebuilt; finished exercises are kept.
+    let workoutWarning = null;
+    if (goalChanged || equipmentChanged) {
+      try {
+        await generateAndSaveWorkoutPlan(
+          userId,
+          'weekly',
+          before.workout_experience_level || 'Beginner',
+          null,
+          { keepProgress: true }
+        );
+      } catch (workoutErr) {
+        console.error('Workout regeneration after profile update failed:', workoutErr.message);
+        workoutWarning = 'Your changes were saved, but your workout plan could not be updated right now.';
+      }
+    }
+    const allWarnings = [planWarning, workoutWarning].filter(Boolean).join(' ');
+
     res.json({
       success: true,
       message: 'Profile updated successfully.',
       user: result.rows[0],
-      ...(planWarning ? { plan_warning: planWarning } : {}),
+      ...(allWarnings ? { plan_warning: allWarnings } : {}),
     });
 
   } catch (err) {

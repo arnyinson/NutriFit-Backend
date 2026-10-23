@@ -39,7 +39,7 @@ const sendPushNotification = async (pushTokens, title, body, data = {}) => {
 // and included in the push `data` so the app can open the right screen on tap.
 // ============================================
 const notifyUser = async (userId, title, message, type, pushToken, extra = {}) => {
-  const ticketId = extra.ticket_id ? Number(extra.ticket_id) : null;
+  const ticketId = extra.ticket_id ? String(extra.ticket_id) : null;
 
   try {
     await pool.query(

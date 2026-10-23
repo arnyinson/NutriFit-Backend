@@ -20,6 +20,9 @@ const isValidPassword = (password) => {
   return hasMinLength && hasUppercase && hasNumber && hasSpecialChar;
 };
 
+// Names may only contain letters (any language), spaces, apostrophes, periods and hyphens.
+const isValidPersonName = (v) => /^[\p{L}][\p{L}\s.'-]*$/u.test(v);
+
 // Calculate BMI
 const calculateBMI = (weight, height) => {
   const heightInMeters = height / 100;
@@ -77,6 +80,10 @@ const register = async (req, res) => {
 
     if (!fullName || !firstName || !lastName || !email || !password || !username || !birthday || !sex || !height || !weight || !dietary_goal || !activity_level) {
       return res.status(400).json({ error: 'Please fill in all required fields.' });
+    }
+
+    if (!isValidPersonName(firstName) || !isValidPersonName(lastName) || (middleName && !isValidPersonName(middleName))) {
+      return res.status(400).json({ error: 'Names can only contain letters, spaces, apostrophes, periods and hyphens (no numbers).' });
     }
 
     const VALID_DIETS = ['None', 'Pescatarian', 'Vegetarian', 'Vegan'];

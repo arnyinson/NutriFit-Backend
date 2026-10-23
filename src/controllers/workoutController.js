@@ -108,7 +108,7 @@ const applyProgressiveOverload = async (userId) => {
 // SHARED: Generate + Save Workout Plan (ginagamit ng generateWorkoutPlan endpoint
 // AT ng auto-regeneration logic sa loob ng getMyWorkoutPlan)
 // ============================================
-const generateAndSaveWorkoutPlan = async (userId, mode, experienceLevel, _availableEquipmentIgnored) => {
+const generateAndSaveWorkoutPlan = async (userId, mode, experienceLevel, _availableEquipmentIgnored, options = {}) => {
   // Kunin ang dietary goal AT ang totoong available_equipment ng user mula sa
   // database — hindi na umaasa sa params na ipinapasa (dating hardcoded na
   // ["Bodyweight", "Dumbbell"] sa mobile app, kahit hindi iyon totoong meron
@@ -137,16 +137,42 @@ const generateAndSaveWorkoutPlan = async (userId, mode, experienceLevel, _availa
   // Clear existing AI-GENERATED workout plan lang para sa linggong ito —
   // panatilihin ang mga custom-logged workout (is_custom = true) para hindi
   // mabura ang "Log Own Workout" entries ng user tuwing mag-re-regenerate
-  await pool.query(
-    'DELETE FROM workout_plans WHERE user_id = $1 AND week_start = $2 AND is_custom = false',
-    [userId, weekStart]
-  );
+  // keepProgress (used when the profile changes mid-week): only today and the
+  // coming days are rebuilt. Earlier days and exercises already marked done are kept.
+  const keepProgress = !!options.keepProgress;
+  const WEEK_ORDER = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  const todayIdx = (getPhilippineNow().getDay() + 6) % 7;
+  const activeDays = keepProgress ? WEEK_ORDER.slice(todayIdx) : WEEK_ORDER;
+  const keptKeys = new Set();
+
+  if (keepProgress) {
+    const placeholders = activeDays.map((_, i) => `$${i + 3}`).join(', ');
+    await pool.query(
+      `DELETE FROM workout_plans
+       WHERE user_id = $1 AND week_start = $2 AND is_custom = false AND done = false
+         AND day IN (${placeholders})`,
+      [userId, weekStart, ...activeDays]
+    );
+    const keptRes = await pool.query(
+      `SELECT day, exercise_id FROM workout_plans
+       WHERE user_id = $1 AND week_start = $2 AND day IN (${placeholders})`,
+      [userId, weekStart, ...activeDays]
+    );
+    keptRes.rows.forEach((r) => keptKeys.add(`${r.day}|${r.exercise_id}`));
+  } else {
+    await pool.query(
+      'DELETE FROM workout_plans WHERE user_id = $1 AND week_start = $2 AND is_custom = false',
+      [userId, weekStart]
+    );
+  }
 
   // Save new workout plan
   for (const day of workout_plan) {
     if (day.is_rest) continue;
+    if (keepProgress && !activeDays.includes(day.day)) continue;
 
     for (const exercise of day.exercises) {
+      if (keepProgress && keptKeys.has(`${day.day}|${exercise.id}`)) continue;
       await pool.query(
         `INSERT INTO workout_plans (
           user_id, exercise_id, day, week_start, sets, reps, done
@@ -683,6 +709,7 @@ module.exports = {
   updateExercise,
   deleteExercise,
   generateWorkoutPlan,
+  generateAndSaveWorkoutPlan,
   getMyWorkoutPlan,
   toggleExerciseDone,
   logWorkout,
