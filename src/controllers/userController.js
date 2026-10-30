@@ -479,7 +479,7 @@ const getDashboardStats = async (req, res) => {
     `);
 
     const recentUsers = await pool.query(`
-      SELECT name, email, dietary_goal, is_active, birthday
+      SELECT name, email, dietary_goal, is_active, banned, archived, birthday
       FROM users ORDER BY created_at DESC LIMIT 5
     `);
 
