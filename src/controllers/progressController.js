@@ -250,31 +250,191 @@ const getWeightHistory = async (req, res) => {
 };
 
 // ============================================
+// DATE HELPERS (Philippine time, plain YYYY-MM-DD strings)
+// ============================================
+const todayManila = () =>
+  new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
+
+const addDays = (key, n) => {
+  const d = new Date(`${key}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+
+// Monday of the week that contains the given date
+const mondayOf = (key) => {
+  const dow = new Date(`${key}T00:00:00Z`).getUTCDay(); // 0 = Sunday
+  return addDays(key, dow === 0 ? -6 : 1 - dow);
+};
+
+// Maintenance calories (Mifflin-St Jeor x activity). users.tdee holds the
+// goal-adjusted TARGET (Cutting = -400, Bulking = +400), so the weight
+// forecast needs the real maintenance value instead.
+const ACTIVITY_MULTIPLIERS = [
+  ['Sedentary', 1.2],
+  ['Lightly', 1.375],
+  ['Moderately', 1.55],
+  ['Very', 1.725],
+  ['Extra', 1.9],
+];
+
+const computeMaintenanceTdee = (u) => {
+  if (!u) return 0;
+  const weight = parseFloat(u.weight);
+  const height = parseFloat(u.height);
+  const birthday = u.birthday ? new Date(u.birthday) : null;
+
+  if (weight > 0 && height > 0 && birthday && !isNaN(birthday.getTime()) && u.sex) {
+    const now = new Date();
+    let age = now.getFullYear() - birthday.getFullYear();
+    const hadBirthday =
+      now.getMonth() > birthday.getMonth() ||
+      (now.getMonth() === birthday.getMonth() && now.getDate() >= birthday.getDate());
+    if (!hadBirthday) age -= 1;
+
+    const bmr = u.sex === 'Male'
+      ? 10 * weight + 6.25 * height - 5 * age + 5
+      : 10 * weight + 6.25 * height - 5 * age - 161;
+    const level = String(u.activity_level || '');
+    const match = ACTIVITY_MULTIPLIERS.find(([prefix]) => level.startsWith(prefix));
+    return Math.round(bmr * (match ? match[1] : 1.55));
+  }
+
+  // Fallback: undo the goal adjustment on the stored target
+  const stored = parseFloat(u.tdee || 0);
+  if (!stored) return 0;
+  if (u.dietary_goal === 'Cutting') return stored + 400;
+  if (u.dietary_goal === 'Bulking') return stored - 400;
+  return stored;
+};
+
+// ============================================
 // GET SUMMARY (for Progress screen — Daily, Weekly, or Monthly)
+// - Weekly = Monday up to today, Monthly = last 30 days, Daily = today
+// - EVERY day in the period is returned. Days with no saved progress row
+//   (the user did not open Stats that day) are computed from the meal plan
+//   (taken meals) and food logs, so no day is missing from the list.
+// - Calorie averages only count days that have a log, so "No log" days
+//   do not drag the adherence % and the forecast down.
 // ============================================
 const getWeeklySummary = async (req, res) => {
   try {
     const userId = req.userId;
-    const { period } = req.query; // 'daily' | 'weekly' | 'monthly', defaults to weekly
+    const { period, mode } = req.query; // period: 'daily' | 'weekly' | 'monthly'
+    const planMode = mode === 'continuous' ? 'continuous' : 'weekly';
 
-    let daysBack = 6; // weekly (7 days total, inclusive of today)
-    if (period === 'daily') daysBack = 0; // ngayong araw lang
-    else if (period === 'monthly') daysBack = 29; // 30 days total
+    const today = todayManila();
+    let startKey;
+    if (period === 'daily') startKey = today;
+    else if (period === 'monthly') startKey = addDays(today, -29);
+    else startKey = mondayOf(today);
 
-    const result = await pool.query(
-      `SELECT date, weight, calories_consumed, calories_target,
-              protein_consumed, carbs_consumed, fats_consumed,
-              workout_completed, meals_taken, total_meals,
-              total_exercises, exercises_completed
-       FROM progress
-       WHERE user_id = $1 AND date >= current_date() - $2::int
-       ORDER BY date ASC`,
-      [userId, daysBack]
-    );
+    const allKeys = [];
+    for (let k = startKey; k <= today; k = addDays(k, 1)) allKeys.push(k);
 
-    const rows = result.rows;
+    const [progressResult, userResult] = await Promise.all([
+      pool.query(
+        `SELECT TO_CHAR(date, 'YYYY-MM-DD') AS date_key, weight,
+                calories_consumed, calories_target,
+                protein_consumed, carbs_consumed, fats_consumed,
+                workout_completed, meals_taken, total_meals,
+                total_exercises, exercises_completed
+         FROM progress
+         WHERE user_id = $1 AND date >= $2::date AND date <= $3::date
+         ORDER BY date ASC`,
+        [userId, startKey, today]
+      ),
+      pool.query(
+        `SELECT weight, height, birthday, sex, activity_level, tdee, dietary_goal
+         FROM users WHERE id = $1`,
+        [userId]
+      ),
+    ]);
 
-    if (rows.length === 0) {
+    const rows = progressResult.rows;
+    const user = userResult.rows[0];
+    const rowByKey = {};
+    rows.forEach((r) => { rowByKey[r.date_key] = r; });
+
+    // Days without a saved row: read the meal plan + food logs directly
+    const missingKeys = allKeys.filter((k) => !rowByKey[k]);
+    const mealsByKey = {};
+    const foodByKey = {};
+    if (missingKeys.length > 0) {
+      const mealResult = await pool.query(
+        `SELECT TO_CHAR(mp.plan_date, 'YYYY-MM-DD') AS d, mp.taken,
+                m.calories, m.protein, m.carbs, m.fats
+         FROM meal_plans mp
+         JOIN meals m ON mp.meal_id = m.id
+         WHERE mp.user_id = $1 AND mp.mode = $2
+           AND mp.plan_date >= $3::date AND mp.plan_date <= $4::date`,
+        [userId, planMode, startKey, today]
+      );
+      mealResult.rows.forEach((r) => {
+        (mealsByKey[r.d] = mealsByKey[r.d] || []).push(r);
+      });
+
+      const foodResult = await pool.query(
+        `SELECT TO_CHAR(DATE(logged_at), 'YYYY-MM-DD') AS d,
+                calories, protein, carbs, fats
+         FROM food_logs
+         WHERE user_id = $1
+           AND DATE(logged_at) >= $2::date AND DATE(logged_at) <= $3::date`,
+        [userId, startKey, today]
+      );
+      foodResult.rows.forEach((r) => {
+        (foodByKey[r.d] = foodByKey[r.d] || []).push(r);
+      });
+    }
+
+    const lastRowTarget = rows.length
+      ? parseFloat(rows[rows.length - 1].calories_target || 0)
+      : 0;
+    const fallbackTarget = lastRowTarget || parseFloat(user?.tdee || 2000);
+    const num = (v) => parseFloat(v || 0);
+
+    const entries = allKeys.map((key) => {
+      const r = rowByKey[key];
+      if (r) {
+        return {
+          key,
+          target: num(r.calories_target) || fallbackTarget,
+          actual: num(r.calories_consumed),
+          protein: num(r.protein_consumed),
+          carbs: num(r.carbs_consumed),
+          fats: num(r.fats_consumed),
+          totalMeals: num(r.total_meals),
+          mealsTaken: num(r.meals_taken),
+          totalExercises: num(r.total_exercises),
+          exercisesCompleted: num(r.exercises_completed),
+          weight: r.weight !== null && r.weight !== undefined ? parseFloat(r.weight) : null,
+        };
+      }
+      const meals = mealsByKey[key] || [];
+      const taken = meals.filter((m) => m.taken);
+      const food = foodByKey[key] || [];
+      const sum = (list, f) => list.reduce((s, x) => s + num(x[f]), 0);
+      return {
+        key,
+        target: fallbackTarget,
+        actual: sum(taken, 'calories') + sum(food, 'calories'),
+        protein: sum(taken, 'protein') + sum(food, 'protein'),
+        carbs: sum(taken, 'carbs') + sum(food, 'carbs'),
+        fats: sum(taken, 'fats') + sum(food, 'fats'),
+        totalMeals: meals.length,
+        mealsTaken: taken.length,
+        totalExercises: 0,
+        exercisesCompleted: 0,
+        weight: null,
+      };
+    });
+
+    const maintenanceTdee = computeMaintenanceTdee(user);
+
+    // Nothing at all in this period (new user): keep the "No records yet" screen
+    const hasAnything =
+      rows.length > 0 || entries.some((e) => e.actual > 0 || e.totalMeals > 0);
+    if (!hasAnything) {
       return res.json({
         success: true,
         summary: {
@@ -284,66 +444,65 @@ const getWeeklySummary = async (req, res) => {
           macros: { protein: 0, carbs: 0, fats: 0 },
           workoutCompletion: 0,
           mealConsistency: 0,
-        }
+          maintenanceTdee,
+        },
       });
     }
 
-    // Daily calories for chart — gamitin ang weekday label sa daily/weekly,
-    // pero petsa (hal. "Sep 5") sa monthly, dahil masyadong dami kung weekday lang
-    const dailyCalories = rows.map(r => ({
-      day: period === 'monthly'
-        ? new Date(r.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-        : new Date(r.date).toLocaleDateString('en-US', { weekday: 'short' }),
-      target: parseFloat(r.calories_target || 0),
-      actual: parseFloat(r.calories_consumed || 0),
+    // Chart / records: weekday label for daily + weekly, "Sep 5" for monthly
+    const dailyCalories = entries.map((e) => ({
+      day: new Date(`${e.key}T00:00:00Z`).toLocaleDateString(
+        'en-US',
+        period === 'monthly'
+          ? { month: 'short', day: 'numeric', timeZone: 'UTC' }
+          : { weekday: 'short', timeZone: 'UTC' }
+      ),
+      target: e.target,
+      actual: e.actual,
     }));
 
-    // Body progress (weight change)
-    const weightsOnly = rows.filter(r => r.weight !== null);
-    const startWeight = weightsOnly.length > 0 ? parseFloat(weightsOnly[0].weight) : 0;
-    const currentWeight = weightsOnly.length > 0 ? parseFloat(weightsOnly[weightsOnly.length - 1].weight) : 0;
+    // Body progress (weight change); fall back to the profile weight
+    const weightsOnly = entries.filter((e) => e.weight !== null);
+    const profileWeight = parseFloat(user?.weight || 0);
+    const startWeight = weightsOnly.length > 0 ? weightsOnly[0].weight : profileWeight;
+    const currentWeight = weightsOnly.length > 0
+      ? weightsOnly[weightsOnly.length - 1].weight
+      : profileWeight;
 
-    // Calorie adherence averages (parse to number first to avoid string concatenation)
+    // Calorie adherence: only days with a log count (no-log days are not "0 kcal eaten")
+    const loggedEntries = entries.filter((e) => e.actual > 0);
+    const targetBase = loggedEntries.length > 0 ? loggedEntries : entries;
     const avgTarget = Math.round(
-      rows.reduce((s, r) => s + parseFloat(r.calories_target || 0), 0) / rows.length
+      targetBase.reduce((s, e) => s + e.target, 0) / targetBase.length
     );
-    const avgActual = Math.round(
-      rows.reduce((s, r) => s + parseFloat(r.calories_consumed || 0), 0) / rows.length
-    );
+    const avgActual = loggedEntries.length > 0
+      ? Math.round(loggedEntries.reduce((s, e) => s + e.actual, 0) / loggedEntries.length)
+      : 0;
     const adherencePercentage = avgTarget > 0 ? Math.round((avgActual / avgTarget) * 100) : 0;
 
-    // Macros averages (as percentages of total calories, roughly)
-    const totalProtein = rows.reduce((s, r) => s + parseFloat(r.protein_consumed || 0), 0);
-    const totalCarbs = rows.reduce((s, r) => s + parseFloat(r.carbs_consumed || 0), 0);
-    const totalFats = rows.reduce((s, r) => s + parseFloat(r.fats_consumed || 0), 0);
-    const proteinCals = totalProtein * 4;
-    const carbsCals = totalCarbs * 4;
-    const fatsCals = totalFats * 9;
+    // Macros as a share of total macro calories
+    const proteinCals = entries.reduce((s, e) => s + e.protein, 0) * 4;
+    const carbsCals = entries.reduce((s, e) => s + e.carbs, 0) * 4;
+    const fatsCals = entries.reduce((s, e) => s + e.fats, 0) * 9;
     const totalMacroCals = proteinCals + carbsCals + fatsCals || 1;
-
     const macros = {
       protein: Math.round((proteinCals / totalMacroCals) * 100),
       carbs: Math.round((carbsCals / totalMacroCals) * 100),
       fats: Math.round((fatsCals / totalMacroCals) * 100),
     };
 
-    // Consistency — WEIGHTED percentage (total completed ÷ total scheduled),
-    // at IBINUBUKOD ang mga araw na walang naka-schedule (Rest Day / walang
-    // meal plan) sa halip na bilangin sila bilang "0%". Ito ang tamang fix
-    // dahil noon, ang mga Rest Days at "walang meal plan" na araw ay
-    // palaging bumababa ang average kahit wala namang dapat gawin doon.
-    const workoutScheduledRows = rows.filter(r => parseFloat(r.total_exercises || 0) > 0);
-    const totalExercisesScheduled = workoutScheduledRows.reduce((s, r) => s + parseFloat(r.total_exercises || 0), 0);
-    const totalExercisesCompleted = workoutScheduledRows.reduce((s, r) => s + parseFloat(r.exercises_completed || 0), 0);
-    const workoutCompletion = totalExercisesScheduled > 0
-      ? Math.round((totalExercisesCompleted / totalExercisesScheduled) * 100)
-      : 0;
+    // Consistency: WEIGHTED (completed / scheduled); days with nothing scheduled
+    // (Rest Day / no meal plan) are left out instead of counting as 0%.
+    const workoutDays = entries.filter((e) => e.totalExercises > 0);
+    const exScheduled = workoutDays.reduce((s, e) => s + e.totalExercises, 0);
+    const exDone = workoutDays.reduce((s, e) => s + e.exercisesCompleted, 0);
+    const workoutCompletion = exScheduled > 0 ? Math.round((exDone / exScheduled) * 100) : 0;
 
-    const mealScheduledRows = rows.filter(r => parseFloat(r.total_meals || 0) > 0);
-    const totalMealsScheduled = mealScheduledRows.reduce((s, r) => s + parseFloat(r.total_meals || 0), 0);
-    const totalMealsTaken = mealScheduledRows.reduce((s, r) => s + parseFloat(r.meals_taken || 0), 0);
-    const mealConsistency = totalMealsScheduled > 0
-      ? Math.round((totalMealsTaken / totalMealsScheduled) * 100)
+    const mealDays = entries.filter((e) => e.totalMeals > 0);
+    const mealsScheduled = mealDays.reduce((s, e) => s + e.totalMeals, 0);
+    const mealsTaken = mealDays.reduce((s, e) => s + e.mealsTaken, 0);
+    const mealConsistency = mealsScheduled > 0
+      ? Math.round((mealsTaken / mealsScheduled) * 100)
       : 0;
 
     res.json({
@@ -363,7 +522,8 @@ const getWeeklySummary = async (req, res) => {
         macros,
         workoutCompletion,
         mealConsistency,
-      }
+        maintenanceTdee,
+      },
     });
 
   } catch (err) {
