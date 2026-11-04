@@ -47,4 +47,91 @@ const sendOtpEmail = async (toEmail, otpCode, purpose) => {
   }
 };
 
-module.exports = { generateOtp, sendOtpEmail };
+// Keeps names / ban reasons typed by admins or users from breaking the email HTML
+const escapeHtml = (value) =>
+  String(value ?? '').replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+
+// Email copy for each account status change
+const ACCOUNT_EMAILS = {
+  banned: {
+    subject: 'Your NutriFit account has been banned',
+    heading: 'Account banned',
+    color: '#E53935',
+    body: 'Your NutriFit account has been banned and you can no longer log in.',
+    showReason: true,
+    footer: 'If you believe this is a mistake, please contact support.',
+  },
+  unbanned: {
+    subject: 'Your NutriFit account has been restored',
+    heading: 'Account restored',
+    color: '#4CAF50',
+    body: 'Your NutriFit account has been unbanned. You can log in again.',
+    footer: 'Welcome back!',
+  },
+  deactivated: {
+    subject: 'Your NutriFit account has been deactivated',
+    heading: 'Account deactivated',
+    color: '#FF9800',
+    body: 'Your NutriFit account has been deactivated by an administrator. You will not be able to log in until it is activated again.',
+    footer: 'If you believe this is a mistake, please contact support.',
+  },
+  activated: {
+    subject: 'Your NutriFit account has been activated',
+    heading: 'Account activated',
+    color: '#4CAF50',
+    body: 'Your NutriFit account has been activated. You can log in again.',
+    footer: 'Welcome back!',
+  },
+  archived: {
+    subject: 'Your NutriFit account has been archived',
+    heading: 'Account archived',
+    color: '#FF9800',
+    body: 'Your NutriFit account was archived because you have not logged in for 30 days. Your data is safe and nothing was deleted.',
+    footer: 'Log in again to restore your account.',
+  },
+  unarchived: {
+    subject: 'Your NutriFit account has been restored',
+    heading: 'Account restored',
+    color: '#4CAF50',
+    body: 'Your NutriFit account has been restored from the archive.',
+    footer: 'Welcome back!',
+  },
+};
+
+// Tells the user that their account status changed. It never throws:
+// if the email cannot be sent, the ban / status change must still go through.
+const sendAccountStatusEmail = async (toEmail, name, kind, reason) => {
+  const copy = ACCOUNT_EMAILS[kind];
+  if (!copy || !toEmail) return null;
+
+  try {
+    return await resend.emails.send({
+      from: 'NutriFit <noreply@nutrifitcapstone.xyz>',
+      to: toEmail,
+      subject: copy.subject,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
+          <h2 style="color: ${copy.color};">${copy.heading}</h2>
+          <p style="color: #333; font-size: 14px;">Hi ${escapeHtml(name || 'there')},</p>
+          <p style="color: #333; font-size: 14px;">${copy.body}</p>
+          ${
+            copy.showReason && reason
+              ? `<div style="background: #fff5f5; border-radius: 12px; padding: 16px; margin: 20px 0;">
+                   <p style="margin: 0; color: #888; font-size: 12px;">Reason</p>
+                   <p style="margin: 4px 0 0; color: #333; font-size: 14px;">${escapeHtml(reason)}</p>
+                 </div>`
+              : ''
+          }
+          <p style="color: #888; font-size: 12px;">${copy.footer}</p>
+        </div>
+      `,
+    });
+  } catch (err) {
+    console.error('Send account status email error:', err.message);
+    return null;
+  }
+};
+
+module.exports = { generateOtp, sendOtpEmail, sendAccountStatusEmail };

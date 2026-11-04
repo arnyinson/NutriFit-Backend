@@ -2,6 +2,7 @@ const pool = require('../config/database');
 const bcrypt = require('bcryptjs');
 const { generateAndSaveMealPlan } = require('./mealController');
 const { generateAndSaveWorkoutPlan } = require('./workoutController');
+const { notifyAccountChange } = require('../config/accountNotices');
 
 // Names may only contain letters (any language), spaces, apostrophes, periods and hyphens.
 const isValidPersonName = (v) => /^[\p{L}][\p{L}\s.'-]*$/u.test(v);
@@ -368,7 +369,7 @@ const banUser = async (req, res) => {
       `UPDATE users
        SET banned = true, ban_reason = $1, banned_at = now(), is_active = false
        WHERE id = $2
-       RETURNING id, name, is_active, banned, ban_reason, banned_at`,
+       RETURNING id, name, email, push_token, is_active, banned, ban_reason, banned_at`,
       [banReason, id]
     );
 
@@ -376,7 +377,12 @@ const banUser = async (req, res) => {
       return res.status(404).json({ error: 'User not found.' });
     }
 
-    res.json({ success: true, message: 'User banned.', user: result.rows[0] });
+    // Push + in-app notice + email. Not awaited: a slow or failed email must not block the ban.
+    const row = result.rows[0];
+    notifyAccountChange(row, 'banned', row.ban_reason).catch(() => {});
+
+    const { email, push_token, ...user } = row;
+    res.json({ success: true, message: 'User banned.', user });
 
   } catch (err) {
     console.error('Ban user error:', err.message);
@@ -392,7 +398,7 @@ const unbanUser = async (req, res) => {
       `UPDATE users
        SET banned = false, ban_reason = NULL, banned_at = NULL, is_active = true
        WHERE id = $1
-       RETURNING id, name, is_active, banned`,
+       RETURNING id, name, email, push_token, is_active, banned`,
       [id]
     );
 
@@ -400,7 +406,11 @@ const unbanUser = async (req, res) => {
       return res.status(404).json({ error: 'User not found.' });
     }
 
-    res.json({ success: true, message: 'User unbanned.', user: result.rows[0] });
+    const row = result.rows[0];
+    notifyAccountChange(row, 'unbanned').catch(() => {});
+
+    const { email, push_token, ...user } = row;
+    res.json({ success: true, message: 'User unbanned.', user });
 
   } catch (err) {
     console.error('Unban user error:', err.message);
@@ -417,7 +427,7 @@ const toggleUserStatus = async (req, res) => {
     const { is_active } = req.body;
 
     const result = await pool.query(
-      'UPDATE users SET is_active = $1 WHERE id = $2 RETURNING id, name, is_active',
+      'UPDATE users SET is_active = $1 WHERE id = $2 RETURNING id, name, email, push_token, is_active',
       [is_active, id]
     );
 
@@ -425,7 +435,11 @@ const toggleUserStatus = async (req, res) => {
       return res.status(404).json({ error: 'User not found.' });
     }
 
-    res.json({ success: true, message: 'User status updated.', user: result.rows[0] });
+    const row = result.rows[0];
+    notifyAccountChange(row, row.is_active ? 'activated' : 'deactivated').catch(() => {});
+
+    const { email, push_token, ...user } = row;
+    res.json({ success: true, message: 'User status updated.', user });
 
   } catch (err) {
     console.error('Toggle user status error:', err.message);
@@ -441,7 +455,7 @@ const unarchiveUser = async (req, res) => {
     const { id } = req.params;
 
     const result = await pool.query(
-      'UPDATE users SET archived = false, last_login = now() WHERE id = $1 RETURNING id, name, archived',
+      'UPDATE users SET archived = false, last_login = now() WHERE id = $1 RETURNING id, name, email, push_token, archived',
       [id]
     );
 
@@ -449,7 +463,11 @@ const unarchiveUser = async (req, res) => {
       return res.status(404).json({ error: 'User not found.' });
     }
 
-    res.json({ success: true, message: 'User unarchived successfully.', user: result.rows[0] });
+    const row = result.rows[0];
+    notifyAccountChange(row, 'unarchived').catch(() => {});
+
+    const { email, push_token, ...user } = row;
+    res.json({ success: true, message: 'User unarchived successfully.', user });
 
   } catch (err) {
     console.error('Unarchive user error:', err.message);
@@ -463,11 +481,24 @@ const unarchiveUser = async (req, res) => {
 const getDashboardStats = async (req, res) => {
   try {
     const totalUsers = await pool.query('SELECT COUNT(*) FROM users');
+    // "Active plan" = a user who is not banned / archived and has a plan that still
+    // covers today or later. Same rule for meals and workouts, dates in Philippine time.
+    //  - meals:    has a planned day from today onwards
+    //  - workouts: today falls inside the plan's week (week_start .. week_start + 6)
     const activeMealPlans = await pool.query(
-      "SELECT COUNT(DISTINCT user_id) FROM meal_plans WHERE week_start >= current_date() - 7"
+      `SELECT COUNT(DISTINCT mp.user_id)
+       FROM meal_plans mp
+       JOIN users u ON u.id = mp.user_id
+       WHERE u.banned = false AND u.archived = false
+         AND mp.plan_date >= (now() AT TIME ZONE 'Asia/Manila')::date`
     );
     const activeWorkoutPlans = await pool.query(
-      "SELECT COUNT(DISTINCT user_id) FROM workout_plans WHERE week_start >= current_date() - 7"
+      `SELECT COUNT(DISTINCT wp.user_id)
+       FROM workout_plans wp
+       JOIN users u ON u.id = wp.user_id
+       WHERE u.banned = false AND u.archived = false
+         AND wp.week_start::date <= (now() AT TIME ZONE 'Asia/Manila')::date
+         AND wp.week_start::date + 6 >= (now() AT TIME ZONE 'Asia/Manila')::date`
     );
     const allergyCases = await pool.query(
       "SELECT COUNT(*) FROM users WHERE array_length(allergens, 1) > 0"

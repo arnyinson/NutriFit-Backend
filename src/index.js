@@ -17,12 +17,32 @@ const { initMealReminders } = require('./config/mealReminders');
 const { initWorkoutReminders } = require('./config/workoutReminders');
 const { initAutoArchive } = require('./config/autoArchive');
 const { initProgressReminders } = require('./config/progressReminders');
-const { initSocket } = require('./config/socket');
+const { initSocket, emitToAdmins } = require('./config/socket');
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
+
+// Live updates for the admin site: after any successful change (POST / PUT /
+// PATCH / DELETE) the admins get a "data:changed" signal and reload silently.
+// Bursts of requests are merged into ONE signal (500 ms window).
+// Tickets have their own event, and notifications / progress syncs do not
+// change anything shown on the admin pages, so they are skipped.
+const LIVE_SKIP = ['/api/tickets', '/api/notifications', '/api/progress'];
+let liveTimer = null;
+app.use((req, res, next) => {
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && !LIVE_SKIP.some((p) => req.originalUrl.startsWith(p))) {
+    res.on('finish', () => {
+      if (res.statusCode >= 400 || liveTimer) return;
+      liveTimer = setTimeout(() => {
+        liveTimer = null;
+        emitToAdmins('data:changed', {});
+      }, 500);
+    });
+  }
+  next();
+});
 
 // Test route
 app.get('/', (req, res) => {
