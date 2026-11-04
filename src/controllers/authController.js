@@ -2,6 +2,7 @@ const pool = require('../config/database');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { generateOtp, sendOtpEmail } = require('../config/emailService');
+const { makeAppealToken } = require('../config/appeal');
 require('dotenv').config();
 
 const OTP_EXPIRY_MINUTES = 10;
@@ -316,6 +317,8 @@ const login = async (req, res) => {
       return res.status(403).json({
         error: `Your account has been banned. Reason: ${user.ban_reason || 'Violation of the Terms and Conditions'}. If you believe this is a mistake, please contact support.`,
         code: 'ACCOUNT_BANNED',
+        ban_reason: user.ban_reason || 'Violation of the Terms and Conditions',
+        appealToken: makeAppealToken(user.id),
       });
     }
 

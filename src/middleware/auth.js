@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
+const { makeAppealToken } = require('../config/appeal');
 require('dotenv').config();
 
 const verifyToken = (req, res, next) => {
@@ -12,6 +13,11 @@ const verifyToken = (req, res, next) => {
 
   jwt.verify(token, process.env.JWT_SECRET, async (err, decoded) => {
     if (err) {
+      return res.status(403).json({ error: 'Invalid or expired token.' });
+    }
+
+    // An appeal token only lets a banned user send an appeal; it is not a login
+    if (decoded.purpose === 'appeal') {
       return res.status(403).json({ error: 'Invalid or expired token.' });
     }
 
@@ -31,6 +37,8 @@ const verifyToken = (req, res, next) => {
         return res.status(403).json({
           error: `Your account has been banned. Reason: ${account.ban_reason || 'Violation of the Terms and Conditions'}. If you believe this is a mistake, please contact support.`,
           code: 'ACCOUNT_BANNED',
+          ban_reason: account.ban_reason || 'Violation of the Terms and Conditions',
+          appealToken: makeAppealToken(decoded.id),
         });
       }
 
@@ -60,7 +68,7 @@ const optionalVerifyToken = (req, res, next) => {
   }
 
   jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
-    if (!err && decoded) {
+    if (!err && decoded && decoded.purpose !== 'appeal') {
       req.userId = decoded.id;
     }
     next(); 

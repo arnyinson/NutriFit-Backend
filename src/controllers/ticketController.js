@@ -1,6 +1,10 @@
 const pool = require('../config/database');
 const { notifyUser } = require('../config/pushNotifications');
 const { emitToAdmins, emitToUser } = require('../config/socket');
+const { readAppealToken, sendAppealReplyEmail } = require('../config/appeal');
+
+const APPEAL_TYPE = 'Ban Appeal';
+const APPEAL_MAX = 500;
 
 // ============================================
 // SUBMIT TICKET (User)
@@ -28,6 +32,68 @@ const submitTicket = async (req, res) => {
 
   } catch (err) {
     console.error('Submit ticket error:', err.message);
+    res.status(500).json({ error: 'Server error.' });
+  }
+};
+
+// ============================================
+// SUBMIT BAN APPEAL (Public - banned user, uses the short-lived appeal token)
+// ============================================
+const submitBanAppeal = async (req, res) => {
+  try {
+    const { appealToken, message } = req.body;
+
+    const decoded = readAppealToken(appealToken);
+    if (!decoded) {
+      return res.status(401).json({
+        error: 'Your appeal session expired. Please log in again to send an appeal.',
+        code: 'APPEAL_EXPIRED',
+      });
+    }
+
+    const text = (message || '').trim();
+    if (!text) {
+      return res.status(400).json({ error: 'Please write your appeal message.' });
+    }
+    if (text.length > APPEAL_MAX) {
+      return res.status(400).json({ error: `Your message is too long (max ${APPEAL_MAX} characters).` });
+    }
+
+    const userResult = await pool.query('SELECT id, banned FROM users WHERE id = $1', [decoded.id]);
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Account not found.' });
+    }
+    if (!userResult.rows[0].banned) {
+      return res.status(400).json({
+        error: 'Your account is not banned anymore. You can log in normally.',
+        code: 'NOT_BANNED',
+      });
+    }
+
+    // One appeal at a time: wait for the admin to answer the first one
+    const open = await pool.query(
+      `SELECT id FROM tickets WHERE user_id = $1 AND type = $2 AND status IN ('New', 'Pending') LIMIT 1`,
+      [decoded.id, APPEAL_TYPE]
+    );
+    if (open.rows.length > 0) {
+      return res.status(409).json({
+        error: 'You already sent an appeal. Please wait for the admin to review it. You will get a reply by email.',
+        code: 'APPEAL_PENDING',
+      });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO tickets (user_id, type, message, status)
+       VALUES ($1, $2, $3, 'New')
+       RETURNING id`,
+      [decoded.id, APPEAL_TYPE, text]
+    );
+
+    emitToAdmins('tickets:changed', { ticket_id: result.rows[0].id, reason: 'new' });
+
+    res.status(201).json({ success: true, message: 'Appeal sent. We will review it and email you.' });
+  } catch (err) {
+    console.error('Submit ban appeal error:', err.message);
     res.status(500).json({ error: 'Server error.' });
   }
 };
@@ -179,7 +245,16 @@ const respondToTicket = async (req, res) => {
     // Save to DB (in-app Notifications screen) AND send push when there is a reply.
     // type 'ticket' + ticket_id lets the mobile app open the conversation on tap.
     const replyChanged = !!admin_response && admin_response.trim() !== '' && admin_response !== previousResponse;
-    if (replyChanged && ticket.user_id) {
+    const isAppeal = ticket.type === APPEAL_TYPE;
+    if (replyChanged && ticket.user_id && isAppeal) {
+      // A banned user cannot open the app, so the reply goes to their email
+      try {
+        const u = await pool.query('SELECT name, email FROM users WHERE id = $1', [ticket.user_id]);
+        if (u.rows[0]) await sendAppealReplyEmail(u.rows[0].email, u.rows[0].name, admin_response);
+      } catch (mailErr) {
+        console.error('Appeal reply email error (non-fatal):', mailErr.message);
+      }
+    } else if (replyChanged && ticket.user_id) {
       try {
         const userResult = await pool.query('SELECT push_token FROM users WHERE id = $1', [ticket.user_id]);
         const pushToken = userResult.rows[0]?.push_token;
@@ -243,6 +318,7 @@ const updateTicketStatus = async (req, res) => {
 
 module.exports = {
   submitTicket,
+  submitBanAppeal,
   getMyTickets,
   getAllTickets,
   getTicketById,
