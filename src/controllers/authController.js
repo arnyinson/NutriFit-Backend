@@ -326,6 +326,7 @@ const login = async (req, res) => {
       return res.status(403).json({
         error: 'This account has been deactivated. Contact support.',
         code: 'ACCOUNT_DEACTIVATED',
+        appealToken: makeAppealToken(user.id),
       });
     }
 

@@ -1,5 +1,6 @@
 const pool = require('../config/database');
 const axios = require('axios');
+const { consumeRegen, refundRegen, limitMessage } = require('../config/planLimit');
 const { findExerciseVideoSource, downloadExerciseImage } = require('../config/exerciseVideoService');
 
 const ML_API_URL = process.env.ML_API_URL || 'http://localhost:5001';
@@ -333,9 +334,25 @@ const deleteExercise = async (req, res) => {
 // GENERATE WORKOUT PLAN (endpoint - explicit na request mula sa user/app)
 // ============================================
 const generateWorkoutPlan = async (req, res) => {
+  let counted = false;
+  const userId = req.userId;
   try {
-    const userId = req.userId;
     const { mode, experience_level, available_equipment } = req.body;
+
+    // Weekly limit (shared with the meal plan): only counts when this REPLACES
+    // a plan the user already has this week. The first plan is free.
+    const { monday } = getCurrentWeekMonday();
+    const existing = await pool.query(
+      'SELECT 1 FROM workout_plans WHERE user_id = $1 AND week_start = $2 AND is_custom = false LIMIT 1',
+      [userId, formatLocalDate(monday)]
+    );
+    if (existing.rows.length > 0) {
+      const taken = await consumeRegen(userId);
+      if (!taken.ok) {
+        return res.status(429).json({ error: limitMessage(), code: 'PLAN_LIMIT' });
+      }
+      counted = true;
+    }
 
     const data = await generateAndSaveWorkoutPlan(userId, mode, experience_level, available_equipment);
 
@@ -346,6 +363,7 @@ const generateWorkoutPlan = async (req, res) => {
     });
 
   } catch (err) {
+    if (counted) await refundRegen(userId);
     console.error('Generate workout plan error:', err.message);
     if (err.code === 'ECONNREFUSED') {
       return res.status(503).json({ error: 'AI recommendation service is unavailable. Please try again later.' });
@@ -361,51 +379,6 @@ const generateWorkoutPlan = async (req, res) => {
 const getMyWorkoutPlan = async (req, res) => {
   try {
     const userId = req.userId;
-
-    // history=true: used by the Calendar. Returns the saved plans of the past
-    // weeks and the current week, each day with its real date (YYYY-MM-DD).
-    // It never regenerates anything.
-    if (req.query.history === 'true' || req.query.history === '1') {
-      const { monday: histMonday } = getCurrentWeekMonday();
-      const oldest = new Date(histMonday);
-      oldest.setDate(oldest.getDate() - 7 * 26); // up to about 6 months back
-      const histResult = await pool.query(
-        `SELECT wp.id, wp.day, wp.sets, wp.reps, wp.done, wp.custom_exercise_name,
-                wp.week_start::text AS week_start_text,
-                e.id as exercise_id, e.name, e.muscle_group, e.equipment,
-                e.difficulty, e.instructions, e.video_url
-         FROM workout_plans wp
-         LEFT JOIN exercises e ON wp.exercise_id = e.id
-         WHERE wp.user_id = $1 AND wp.week_start >= $2
-         ORDER BY wp.week_start ASC`,
-        [userId, formatLocalDate(oldest)]
-      );
-
-      const DAY_INDEX = {
-        Monday: 0, Tuesday: 1, Wednesday: 2, Thursday: 3,
-        Friday: 4, Saturday: 5, Sunday: 6,
-      };
-      const histGrouped = {};
-      histResult.rows.forEach((row) => {
-        const idx = DAY_INDEX[row.day];
-        if (idx === undefined) return;
-        const [y, m, d] = String(row.week_start_text).slice(0, 10).split('-').map(Number);
-        const date = new Date(Date.UTC(y, m - 1, d + idx)).toISOString().slice(0, 10);
-        if (!histGrouped[date]) histGrouped[date] = { day: row.day, date, exercises: [] };
-        histGrouped[date].exercises.push({
-          plan_id: row.id,
-          sets: row.sets,
-          reps: row.reps,
-          done: row.done,
-          exercise: row.exercise_id
-            ? { id: row.exercise_id, name: row.name, muscle_group: row.muscle_group, equipment: row.equipment }
-            : { id: null, name: row.custom_exercise_name, muscle_group: 'Custom', equipment: 'N/A' },
-        });
-      });
-
-      const histPlan = Object.values(histGrouped).sort((a, b) => (a.date < b.date ? -1 : 1));
-      return res.json({ success: true, workoutPlan: histPlan });
-    }
     const { monday } = getCurrentWeekMonday();
     const currentWeekStart = formatLocalDate(monday);
 

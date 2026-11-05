@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const { generateAndSaveMealPlan } = require('./mealController');
 const { generateAndSaveWorkoutPlan } = require('./workoutController');
 const { notifyAccountChange } = require('../config/accountNotices');
+const { hasAnyActivePlan, consumeRegen, refundRegen, limitMessage } = require('../config/planLimit');
 
 // Names may only contain letters (any language), spaces, apostrophes, periods and hyphens.
 const isValidPersonName = (v) => /^[\p{L}][\p{L}\s.'-]*$/u.test(v);
@@ -113,7 +114,7 @@ const updateMyProfile = async (req, res) => {
     }
 
     // Kunin ang dating diet at allergens para malaman kung kailangang i-regenerate ang meal plan
-    const beforeRes = await pool.query('SELECT dietary_preference, allergens, dietary_goal, activity_level, available_equipment, workout_experience_level FROM users WHERE id = $1', [userId]);
+    const beforeRes = await pool.query('SELECT dietary_preference, allergens, dietary_goal, activity_level, available_equipment, workout_experience_level, birthday, sex, height, weight FROM users WHERE id = $1', [userId]);
     const before = beforeRes.rows[0] || {};
 
     const result = await pool.query(
@@ -162,9 +163,40 @@ const updateMyProfile = async (req, res) => {
     const equipmentChanged =
       Array.isArray(available_equipment) && sortedKey(available_equipment) !== sortedKey(before.available_equipment);
 
-    // Meal plan depends on diet, allergens, goal and activity level (TDEE)
+    // Body data also changes the TDEE, so the meal calories must follow it
+    const sameNumber = (a, b) =>
+      a === undefined || a === null || parseFloat(a) === parseFloat(b);
+    const ymd = (v) => (v ? new Date(v).toISOString().slice(0, 10) : '');
+    const bodyChanged =
+      !sameNumber(weight, before.weight) ||
+      !sameNumber(height, before.height) ||
+      (sex !== undefined && sex !== null && sex !== before.sex) ||
+      (birthday !== undefined && birthday !== null && ymd(birthday) !== ymd(before.birthday));
+
+    const needsMeal = dietChanged || allergensChanged || goalChanged || activityChanged || bodyChanged;
+    const needsWorkout = goalChanged || equipmentChanged;
+
+    // Weekly limit (7 per week, meal + workout together). Only counts when there is
+    // already a plan to replace. When the limit is reached the profile is still saved,
+    // but the plans stay the same.
+    let limitReached = false;
+    let counted = false;
+    let anyRegenOk = false;
+    if (needsMeal || needsWorkout) {
+      try {
+        if (await hasAnyActivePlan(userId)) {
+          const taken = await consumeRegen(userId);
+          if (taken.ok) counted = true;
+          else limitReached = true;
+        }
+      } catch (limitErr) {
+        console.error('Plan limit check failed:', limitErr.message);
+      }
+    }
+
+    // Meal plan depends on diet, allergens, goal, activity level and body data (TDEE)
     let planWarning = null;
-    if (dietChanged || allergensChanged || goalChanged || activityChanged) {
+    if (needsMeal && !limitReached) {
       try {
         const modesRes = await pool.query(
           'SELECT DISTINCT mode FROM meal_plans WHERE user_id = $1 AND plan_date >= current_date()',
@@ -174,6 +206,7 @@ const updateMyProfile = async (req, res) => {
         for (const m of modes) {
           await generateAndSaveMealPlan(userId, m, { keepProgress: true });
         }
+        anyRegenOk = true;
       } catch (planErr) {
         console.error('Plan regeneration after profile update failed:', planErr.message);
         planWarning = planErr.statusCode === 422
@@ -185,7 +218,7 @@ const updateMyProfile = async (req, res) => {
     // Workout plan depends on the dietary goal and the available equipment.
     // Only today and the coming days are rebuilt; finished exercises are kept.
     let workoutWarning = null;
-    if (goalChanged || equipmentChanged) {
+    if (needsWorkout && !limitReached) {
       try {
         await generateAndSaveWorkoutPlan(
           userId,
@@ -194,12 +227,19 @@ const updateMyProfile = async (req, res) => {
           null,
           { keepProgress: true }
         );
+        anyRegenOk = true;
       } catch (workoutErr) {
         console.error('Workout regeneration after profile update failed:', workoutErr.message);
         workoutWarning = 'Your changes were saved, but your workout plan could not be updated right now.';
       }
     }
-    const allWarnings = [planWarning, workoutWarning].filter(Boolean).join(' ');
+    // Nothing could be regenerated: give the used try back
+    if (counted && !anyRegenOk) await refundRegen(userId);
+
+    const limitNote = limitReached
+      ? `Your changes were saved. ${limitMessage()}`
+      : null;
+    const allWarnings = [limitNote, planWarning, workoutWarning].filter(Boolean).join(' ');
 
     res.json({
       success: true,
@@ -379,6 +419,8 @@ const banUser = async (req, res) => {
 
     // Push + in-app notice + email. Not awaited: a slow or failed email must not block the ban.
     const row = result.rows[0];
+    // A new restriction starts fresh: old "not approved" appeals no longer block a new appeal
+    await pool.query(`UPDATE tickets SET appeal_decision = NULL WHERE user_id = $1 AND type IN ('Ban Appeal', 'Deactivation Appeal')`, [id]).catch(() => {});
     notifyAccountChange(row, 'banned', row.ban_reason).catch(() => {});
 
     const { email, push_token, ...user } = row;
@@ -436,6 +478,9 @@ const toggleUserStatus = async (req, res) => {
     }
 
     const row = result.rows[0];
+    if (!row.is_active) {
+      await pool.query(`UPDATE tickets SET appeal_decision = NULL WHERE user_id = $1 AND type IN ('Ban Appeal', 'Deactivation Appeal')`, [id]).catch(() => {});
+    }
     notifyAccountChange(row, row.is_active ? 'activated' : 'deactivated').catch(() => {});
 
     const { email, push_token, ...user } = row;

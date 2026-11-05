@@ -1,6 +1,7 @@
 const pool = require('../config/database');
 const axios = require('axios');
 const { notifyUser } = require('../config/pushNotifications');
+const { consumeRegen, refundRegen, limitMessage } = require('../config/planLimit');
 
 const ML_API_URL = process.env.ML_API_URL || 'http://localhost:5001';
 
@@ -205,22 +206,30 @@ const generateAndSaveMealPlan = async (userId, mode, options = {}) => {
   const todayStr = formatLocalDate(today);
   const keptSlots = new Set();
 
+  // The unique slot is (user, mode, plan_date, meal_type), NOT week_start. Old rows of
+  // an earlier week_start (for example a 30-day Continuous plan made last week) can cover
+  // the same dates, so they are handled by plan_date, not by week_start.
   if (keepProgress) {
     await pool.query(
       `DELETE FROM meal_plans
-       WHERE user_id = $1 AND mode = $2 AND week_start = $3
-         AND plan_date >= $4
+       WHERE user_id = $1 AND mode = $2
+         AND plan_date >= $3
          AND COALESCE(taken, false) = false AND COALESCE(skipped, false) = false`,
-      [userId, mode || 'weekly', weekStart, todayStr]
+      [userId, mode || 'weekly', todayStr]
     );
     const keptRes = await pool.query(
-      'SELECT plan_date, meal_type FROM meal_plans WHERE user_id = $1 AND mode = $2 AND week_start = $3',
+      'SELECT plan_date, meal_type FROM meal_plans WHERE user_id = $1 AND mode = $2 AND plan_date >= $3',
       [userId, mode || 'weekly', weekStart]
     );
     keptRes.rows.forEach((r) => keptSlots.add(`${formatLocalDate(new Date(r.plan_date))}|${r.meal_type}`));
   } else {
     await pool.query(
       'DELETE FROM meal_plans WHERE user_id = $1 AND mode = $2 AND week_start = $3',
+      [userId, mode || 'weekly', weekStart]
+    );
+    // Rows of an older week_start that cover the same dates would collide with the new plan
+    await pool.query(
+      'DELETE FROM meal_plans WHERE user_id = $1 AND mode = $2 AND plan_date >= $3',
       [userId, mode || 'weekly', weekStart]
     );
   }
@@ -533,9 +542,24 @@ const deleteMeal = async (req, res) => {
 // GENERATE MEAL PLAN (endpoint)
 // ============================================
 const generateMealPlan = async (req, res) => {
+  let counted = false;
+  const userId = req.userId;
   try {
-    const userId = req.userId;
     const { mode } = req.body;
+
+    // Weekly limit: only counts when this REPLACES a plan the user already has.
+    // The first plan (nothing to replace) is free, so new users and new weeks work.
+    const existing = await pool.query(
+      'SELECT 1 FROM meal_plans WHERE user_id = $1 AND mode = $2 AND plan_date >= $3 LIMIT 1',
+      [userId, mode || 'weekly', formatLocalDate(getCurrentWeekMonday().today)]
+    );
+    if (existing.rows.length > 0) {
+      const taken = await consumeRegen(userId);
+      if (!taken.ok) {
+        return res.status(429).json({ error: limitMessage(), code: 'PLAN_LIMIT' });
+      }
+      counted = true;
+    }
 
     const data = await generateAndSaveMealPlan(userId, mode || 'weekly');
 
@@ -546,6 +570,7 @@ const generateMealPlan = async (req, res) => {
     });
 
   } catch (err) {
+    if (counted) await refundRegen(userId);
     console.error('Generate meal plan error:', err.message);
     console.error('ML API response data:', err.response?.data);
     console.error('ML API status:', err.response?.status);

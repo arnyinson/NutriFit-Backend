@@ -1,9 +1,11 @@
 const pool = require('../config/database');
 const { notifyUser } = require('../config/pushNotifications');
 const { emitToAdmins, emitToUser } = require('../config/socket');
-const { readAppealToken, sendAppealReplyEmail } = require('../config/appeal');
+const { readAppealToken, sendAppealReplyEmail, sendAppealDecisionEmail } = require('../config/appeal');
 
 const APPEAL_TYPE = 'Ban Appeal';
+const DEACT_APPEAL_TYPE = 'Deactivation Appeal';
+const isAppealType = (t) => t === APPEAL_TYPE || t === DEACT_APPEAL_TYPE;
 const APPEAL_MAX = 500;
 
 // ============================================
@@ -59,21 +61,36 @@ const submitBanAppeal = async (req, res) => {
       return res.status(400).json({ error: `Your message is too long (max ${APPEAL_MAX} characters).` });
     }
 
-    const userResult = await pool.query('SELECT id, banned FROM users WHERE id = $1', [decoded.id]);
+    const userResult = await pool.query('SELECT id, banned, is_active FROM users WHERE id = $1', [decoded.id]);
     if (userResult.rows.length === 0) {
       return res.status(404).json({ error: 'Account not found.' });
     }
-    if (!userResult.rows[0].banned) {
+    const account = userResult.rows[0];
+    // Banned -> Ban Appeal, deactivated (not banned) -> Deactivation Appeal
+    const appealType = account.banned ? APPEAL_TYPE : !account.is_active ? DEACT_APPEAL_TYPE : null;
+    if (!appealType) {
       return res.status(400).json({
-        error: 'Your account is not banned anymore. You can log in normally.',
-        code: 'NOT_BANNED',
+        error: 'Your account is active again. You can log in normally.',
+        code: 'NOT_RESTRICTED',
+      });
+    }
+
+    // A denied appeal is final (until the admin restricts the account again)
+    const denied = await pool.query(
+      `SELECT id FROM tickets WHERE user_id = $1 AND type = $2 AND appeal_decision = 'denied' LIMIT 1`,
+      [decoded.id, appealType]
+    );
+    if (denied.rows.length > 0) {
+      return res.status(409).json({
+        error: 'Your appeal was reviewed and was not approved. This decision is final.',
+        code: 'APPEAL_DENIED',
       });
     }
 
     // One appeal at a time: wait for the admin to answer the first one
     const open = await pool.query(
       `SELECT id FROM tickets WHERE user_id = $1 AND type = $2 AND status IN ('New', 'Pending') LIMIT 1`,
-      [decoded.id, APPEAL_TYPE]
+      [decoded.id, appealType]
     );
     if (open.rows.length > 0) {
       return res.status(409).json({
@@ -86,7 +103,7 @@ const submitBanAppeal = async (req, res) => {
       `INSERT INTO tickets (user_id, type, message, status)
        VALUES ($1, $2, $3, 'New')
        RETURNING id`,
-      [decoded.id, APPEAL_TYPE, text]
+      [decoded.id, appealType, text]
     );
 
     emitToAdmins('tickets:changed', { ticket_id: result.rows[0].id, reason: 'new' });
@@ -214,11 +231,27 @@ const getTicketById = async (req, res) => {
 const respondToTicket = async (req, res) => {
   try {
     const { id } = req.params;
-    const { admin_response, status } = req.body;
+    const { admin_response, status, appeal_decision } = req.body;
 
     // Previous reply, so the user is only notified when the reply really changed
-    const prev = await pool.query('SELECT admin_response FROM tickets WHERE id = $1', [id]);
+    const prev = await pool.query('SELECT admin_response, type, appeal_decision FROM tickets WHERE id = $1', [id]);
     const previousResponse = prev.rows[0]?.admin_response || '';
+
+    // Appeal decision (approve / deny): validated BEFORE anything is saved
+    const decision = isAppealType(prev.rows[0]?.type) && ['approve', 'deny'].includes(appeal_decision) ? appeal_decision : null;
+    const note = String(admin_response || '').trim();
+    if (decision) {
+      if (prev.rows[0].appeal_decision) {
+        return res.status(400).json({ error: 'This appeal was already decided.' });
+      }
+      if (decision === 'deny' && !note) {
+        return res.status(400).json({ error: 'Please write the reason why the appeal is not approved.' });
+      }
+    }
+    // What is saved on the ticket: the decision + the admin's note
+    const savedResponse = decision
+      ? `${decision === 'approve' ? 'Appeal approved' : 'Appeal not approved'}${note ? `\n\n${note}` : ''}`
+      : admin_response;
 
     // responded_at is only refreshed when the reply text actually changes
     const result = await pool.query(
@@ -233,7 +266,7 @@ const respondToTicket = async (req, res) => {
         updated_at = now()
       WHERE id = $3
       RETURNING *`,
-      [admin_response ?? null, status || 'Resolved', id]
+      [savedResponse ?? null, decision ? 'Resolved' : status || 'Resolved', id]
     );
 
     if (result.rows.length === 0) {
@@ -245,8 +278,33 @@ const respondToTicket = async (req, res) => {
     // Save to DB (in-app Notifications screen) AND send push when there is a reply.
     // type 'ticket' + ticket_id lets the mobile app open the conversation on tap.
     const replyChanged = !!admin_response && admin_response.trim() !== '' && admin_response !== previousResponse;
-    const isAppeal = ticket.type === APPEAL_TYPE;
-    if (replyChanged && ticket.user_id && isAppeal) {
+    const isAppeal = isAppealType(ticket.type);
+    if (decision && ticket.user_id) {
+      try {
+        const approved = decision === 'approve';
+        await pool.query('UPDATE tickets SET appeal_decision = $1 WHERE id = $2', [approved ? 'approved' : 'denied', id]);
+        if (approved) {
+          // Approve = give the account back (unban, or activate if only deactivated)
+          await pool.query(
+            ticket.type === APPEAL_TYPE
+              ? `UPDATE users SET banned = false, ban_reason = NULL, banned_at = NULL, is_active = true WHERE id = $1`
+              : `UPDATE users SET is_active = true WHERE id = $1`,
+            [ticket.user_id]
+          );
+          emitToAdmins('data:changed', {});
+        }
+        const u = await pool.query('SELECT name, email FROM users WHERE id = $1', [ticket.user_id]);
+        if (u.rows[0]) {
+          await sendAppealDecisionEmail(
+            u.rows[0].email, u.rows[0].name, approved, note,
+            ticket.type === APPEAL_TYPE ? 'ban' : 'deactivation'
+          );
+        }
+      } catch (decisionErr) {
+        console.error('Appeal decision error:', decisionErr.message);
+        return res.status(500).json({ error: 'The appeal could not be fully processed. Please check the Users page and try again.' });
+      }
+    } else if (replyChanged && ticket.user_id && isAppeal) {
       // A banned user cannot open the app, so the reply goes to their email
       try {
         const u = await pool.query('SELECT name, email FROM users WHERE id = $1', [ticket.user_id]);

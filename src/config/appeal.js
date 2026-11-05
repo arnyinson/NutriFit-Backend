@@ -47,4 +47,42 @@ const sendAppealReplyEmail = async (toEmail, name, reply) => {
   }
 };
 
-module.exports = { makeAppealToken, readAppealToken, sendAppealReplyEmail };
+// Result of an appeal (approved / not approved) with the admin's note.
+// `kind` is 'ban' or 'deactivation'. Never throws.
+const sendAppealDecisionEmail = async (toEmail, name, approved, note, kind) => {
+  if (!toEmail) return null;
+  const what = kind === 'deactivation' ? 'account deactivation' : 'account ban';
+  const heading = approved ? 'Your appeal was approved' : 'Your appeal was not approved';
+  const color = approved ? '#4CAF50' : '#F44336';
+  const intro = approved
+    ? `Good news! An admin reviewed your appeal about your ${what} and your account has been restored. You can log in to NutriFit again.`
+    : `An admin reviewed your appeal about your ${what}, but we are unable to restore your account. This decision is final.`;
+  try {
+    return await resend.emails.send({
+      from: 'NutriFit <noreply@nutrifitcapstone.xyz>',
+      to: toEmail,
+      subject: approved ? 'Your NutriFit appeal was approved' : 'Your NutriFit appeal was not approved',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
+          <h2 style="color: ${color};">${heading}</h2>
+          <p style="color: #333; font-size: 14px;">Hi ${escapeHtml(name || 'there')},</p>
+          <p style="color: #333; font-size: 14px;">${intro}</p>
+          ${
+            note
+              ? `<div style="background: #f5f5f5; border-radius: 12px; padding: 16px; margin: 20px 0;">
+                   <p style="margin: 0; color: #888; font-size: 12px;">Message from the admin</p>
+                   <p style="margin: 4px 0 0; color: #333; font-size: 14px; white-space: pre-line;">${escapeHtml(note)}</p>
+                 </div>`
+              : ''
+          }
+          <p style="color: #888; font-size: 12px;">This is an automated message, please do not reply.</p>
+        </div>
+      `,
+    });
+  } catch (err) {
+    console.error('Send appeal decision email error:', err.message);
+    return null;
+  }
+};
+
+module.exports = { makeAppealToken, readAppealToken, sendAppealReplyEmail, sendAppealDecisionEmail };
