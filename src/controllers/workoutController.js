@@ -376,9 +376,23 @@ const generateWorkoutPlan = async (req, res) => {
 // GET USER'S CURRENT WORKOUT PLAN
 // (may auto-regeneration kung "luma" na ang existing plan)
 // ============================================
+// Offset ng bawat araw mula sa Monday ng linggo (para makuha ang totoong petsa)
+const DAY_OFFSET = { Monday: 0, Tuesday: 1, Wednesday: 2, Thursday: 3, Friday: 4, Saturday: 5, Sunday: 6 };
+
+// weekStart = 'YYYY-MM-DD' (Monday), day = 'Monday'...'Sunday' -> 'YYYY-MM-DD'
+// Gumagamit ng UTC math para hindi maapektuhan ng timezone ng server.
+const dateForDay = (weekStart, day) => {
+  const [y, m, d] = String(weekStart).slice(0, 10).split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + (DAY_OFFSET[day] ?? 0)));
+  return dt.toISOString().slice(0, 10);
+};
+
 const getMyWorkoutPlan = async (req, res) => {
   try {
     const userId = req.userId;
+    // history=true -> ibalik ang lahat ng naka-save na workout (lahat ng linggo),
+    // may "date" ang bawat araw. Ito ang ginagamit ng Calendar.
+    const includeHistory = req.query.history === 'true';
     const { monday } = getCurrentWeekMonday();
     const currentWeekStart = formatLocalDate(monday);
 
@@ -404,29 +418,36 @@ const getMyWorkoutPlan = async (req, res) => {
     // LEFT JOIN sa halip na INNER JOIN — para kasama rin ang mga custom entries
     // na WALANG totoong exercise_id (manual na naitype na pangalan lang)
     const result = await pool.query(
-      `SELECT wp.id, wp.day, wp.sets, wp.reps, wp.done, wp.custom_exercise_name,
+      `SELECT wp.id, wp.day, wp.week_start::text AS week_start_text,
+              wp.sets, wp.reps, wp.done, wp.custom_exercise_name,
               e.id as exercise_id, e.name, e.muscle_group, e.equipment,
               e.difficulty, e.instructions, e.video_url
        FROM workout_plans wp
        LEFT JOIN exercises e ON wp.exercise_id = e.id
-       WHERE wp.user_id = $1 AND wp.week_start = $2
+       WHERE wp.user_id = $1 ${includeHistory ? '' : 'AND wp.week_start = $2'}
        ORDER BY
+         wp.week_start ASC,
          CASE wp.day
            WHEN 'Monday' THEN 1 WHEN 'Tuesday' THEN 2 WHEN 'Wednesday' THEN 3
            WHEN 'Thursday' THEN 4 WHEN 'Friday' THEN 5 WHEN 'Saturday' THEN 6
            WHEN 'Sunday' THEN 7 END`,
-      [userId, currentWeekStart]
+      includeHistory ? [userId] : [userId, currentWeekStart]
     );
 
     // Group by day
     const grouped = {};
     result.rows.forEach(row => {
-      if (!grouped[row.day]) {
-        grouped[row.day] = { day: row.day, exercises: [] };
+      // Sa history mode, hiwalay ang bawat petsa (hindi lang bawat pangalan ng araw)
+      const date = includeHistory ? dateForDay(row.week_start_text, row.day) : null;
+      const key = includeHistory ? date : row.day;
+      if (!grouped[key]) {
+        grouped[key] = includeHistory
+          ? { date, day: row.day, exercises: [] }
+          : { day: row.day, exercises: [] };
       }
       // Kung custom entry (walang totoong exercise_id), gamitin ang manual
       // na pangalan at bigyan ng "generic" na placeholder ang ibang fields
-      grouped[row.day].exercises.push({
+      grouped[key].exercises.push({
         plan_id: row.id,
         sets: row.sets,
         reps: row.reps,
