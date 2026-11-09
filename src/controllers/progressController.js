@@ -151,13 +151,16 @@ const syncTodayProgress = async (req, res) => {
     // Get today's workout completion — kinukuha na rin ang totoong bilang ng
     // exercises (hindi lang boolean), para malaman ng getWeeklySummary kung
     // Rest Day ba ito (total_exercises = 0) at hindi ito bilangin bilang "hindi completed"
+    // Only THIS week's plan: old weeks are kept as history, and without the
+    // week_start filter their same-named day (e.g. every past Monday) was counted too.
     const workoutResult = await pool.query(
       `SELECT wp.done, e.name
        FROM workout_plans wp
        JOIN exercises e ON wp.exercise_id = e.id
        WHERE wp.user_id = $1
-         AND wp.day = TO_CHAR($2::date, 'FMDay')`,
-      [userId, today]
+         AND wp.day = TO_CHAR($2::date, 'FMDay')
+         AND wp.week_start = $3::date`,
+      [userId, today, mondayOf(today)]
     );
     const workoutRows = workoutResult.rows;
     const totalExercises = workoutRows.length;
