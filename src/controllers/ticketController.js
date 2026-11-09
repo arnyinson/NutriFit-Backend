@@ -2,6 +2,7 @@ const pool = require('../config/database');
 const { notifyUser } = require('../config/pushNotifications');
 const { emitToAdmins, emitToUser } = require('../config/socket');
 const { readAppealToken, sendAppealReplyEmail, sendAppealDecisionEmail } = require('../config/appeal');
+const { verifyCaptcha } = require('../config/captcha');
 
 const APPEAL_TYPE = 'Ban Appeal';
 const DEACT_APPEAL_TYPE = 'Deactivation Appeal';
@@ -43,7 +44,7 @@ const submitTicket = async (req, res) => {
 // ============================================
 const submitBanAppeal = async (req, res) => {
   try {
-    const { appealToken, message } = req.body;
+    const { appealToken, message, captcha_token } = req.body;
 
     const decoded = readAppealToken(appealToken);
     if (!decoded) {
@@ -56,6 +57,12 @@ const submitBanAppeal = async (req, res) => {
     const text = (message || '').trim();
     if (!text) {
       return res.status(400).json({ error: 'Please write your appeal message.' });
+    }
+
+    // Captcha is checked last so a valid token is not used up by a bad message
+    const captcha = await verifyCaptcha(captcha_token);
+    if (!captcha.ok) {
+      return res.status(captcha.status).json({ error: captcha.error, code: captcha.code });
     }
     if (text.length > APPEAL_MAX) {
       return res.status(400).json({ error: `Your message is too long (max ${APPEAL_MAX} characters).` });

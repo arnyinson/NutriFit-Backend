@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { generateOtp, sendOtpEmail } = require('../config/emailService');
 const { makeAppealToken } = require('../config/appeal');
+const { verifyCaptcha } = require('../config/captcha');
 require('dotenv').config();
 
 const OTP_EXPIRY_MINUTES = 10;
@@ -70,8 +71,15 @@ const register = async (req, res) => {
     const {
       name, first_name, middle_name, last_name, email, password, username,
       birthday, sex, height, weight,
-      dietary_goal, activity_level, allergens, available_equipment, dietary_preference
+      dietary_goal, activity_level, allergens, available_equipment, dietary_preference,
+      captcha_token
     } = req.body;
+
+    // Captcha first: stops bots before any database work
+    const captcha = await verifyCaptcha(captcha_token);
+    if (!captcha.ok) {
+      return res.status(captcha.status).json({ error: captcha.error, code: captcha.code });
+    }
 
     // Full name is built from First / Middle / Last (middle is optional)
     const firstName = (first_name || '').trim();
