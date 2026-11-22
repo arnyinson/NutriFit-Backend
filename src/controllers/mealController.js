@@ -863,7 +863,7 @@ const getFoodLogs = async (req, res) => {
     if (date) {
       // Petsa ayon sa oras ng Pilipinas. Kung hindi, ang log na ginawa 12:00 AM hanggang 8:00 AM
       // ay mabibilang sa nakaraang araw (UTC) at hindi lalabas sa Dashboard.
-      query += ` AND DATE(logged_at AT TIME ZONE 'Asia/Manila') = $2`;
+      query += ` AND (logged_at::timestamptz AT TIME ZONE 'Asia/Manila')::date = $2::date`;
       params.push(date);
     }
 
