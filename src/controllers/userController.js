@@ -83,6 +83,14 @@ const updateMyProfile = async (req, res) => {
     }
 
 
+    // Age rule: minimum 12 years old, walang maximum
+    if (birthday) {
+      const bd = new Date(birthday);
+      if (isNaN(bd.getTime()) || calculateAge(birthday) < 12) {
+        return res.status(400).json({ error: 'You must be at least 12 years old.' });
+      }
+    }
+
     // If name parts are sent, rebuild the full name from them
     let fullName = name || null;
     let fn = null, mn = null, ln = null;

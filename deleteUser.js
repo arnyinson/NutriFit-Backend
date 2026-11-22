@@ -1,7 +1,7 @@
 const pool = require('./src/config/database');
 require('dotenv').config();
 
-const emailToDelete = 'herreraryedzel@gmail.com';
+const emailToDelete = 'stargazingsecrets@gmail.com';
 
 pool.query('DELETE FROM users WHERE email = $1 RETURNING username, email', [emailToDelete])
   .then(r => {

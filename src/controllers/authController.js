@@ -8,6 +8,9 @@ require('dotenv').config();
 
 const OTP_EXPIRY_MINUTES = 10;
 
+// Minimum age to register. Walang maximum age.
+const MIN_AGE = 12;
+
 // Account lockout settings — 5 maling attempts, 5 minutong timeout
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_DURATION_MINUTES = 5;
@@ -95,6 +98,12 @@ const register = async (req, res) => {
       return res.status(400).json({ error: 'Names can only contain letters, spaces, apostrophes, periods and hyphens (no numbers).' });
     }
 
+    // Age rule: minimum 12 years old, walang maximum
+    const birthDate = new Date(birthday);
+    if (isNaN(birthDate.getTime()) || calculateAge(birthday) < MIN_AGE) {
+      return res.status(400).json({ error: `You must be at least ${MIN_AGE} years old to register.` });
+    }
+
     const VALID_DIETS = ['None', 'Pescatarian', 'Vegetarian', 'Vegan'];
     const dietPref = dietary_preference || 'None';
     if (!VALID_DIETS.includes(dietPref)) {
@@ -102,7 +111,7 @@ const register = async (req, res) => {
     }
 
     const existingUser = await pool.query(
-      'SELECT id FROM users WHERE email = $1 OR username = $2',
+      'SELECT id FROM users WHERE email = $1 OR LOWER(username) = LOWER($2)',
       [email, username]
     );
 
@@ -152,6 +161,24 @@ const register = async (req, res) => {
   } catch (err) {
     console.error('Register error:', err.message);
     res.status(500).json({ error: 'Server error. Please try again.' });
+  }
+};
+
+// ============================================
+// CHECK USERNAME (live check habang nagta-type sa Register)
+// ============================================
+const checkUsername = async (req, res) => {
+  try {
+    const username = String(req.query.username || '').trim();
+    if (!username) return res.status(400).json({ available: false });
+    const r = await pool.query(
+      'SELECT 1 FROM users WHERE LOWER(username) = LOWER($1) LIMIT 1',
+      [username]
+    );
+    res.json({ available: r.rowCount === 0 });
+  } catch (err) {
+    console.error('Check username error:', err.message);
+    res.status(500).json({ error: 'Server error.' });
   }
 };
 
@@ -529,6 +556,7 @@ const adminLogin = async (req, res) => {
 
 module.exports = {
   register,
+  checkUsername,
   verifyRegistrationOtp,
   resendOtp,
   login,
