@@ -106,6 +106,103 @@ const applyProgressiveOverload = async (userId) => {
 };
 
 // ============================================
+// TIMED EXERCISES (plank, mountain climbers, etc.)
+// Ang exercise na may exercises.duration_seconds ay oras ang batayan, hindi reps.
+// Ang panimulang oras ay galing sa admin. Bawat user ay may sariling oras sa
+// user_exercise_durations na tumataas o bumababa ayon sa completion niya.
+// Lahat ay naka-try/catch: kung may problema, babalik sa dating reps ng ML at
+// hindi masisira ang paggawa ng plan.
+// ============================================
+const DURATION_STEP = 5;              // segundo, dagdag/bawas bawat linggo
+const DURATION_UP_THRESHOLD = 0.9;    // 90%+ completion -> dagdagan
+const DURATION_DOWN_THRESHOLD = 0.5;  // <50% completion -> bawasan
+
+// Pinakamababa = kalahati ng panimula (hindi bababa sa 10 sec), pinakamataas = 4x ng panimula
+const durationBounds = (base) => ({
+  min: Math.max(10, Math.round(base * 0.5)),
+  max: Math.round(base * 4),
+});
+const clampDuration = (value, base) => {
+  const { min, max } = durationBounds(base);
+  return Math.max(min, Math.min(max, value));
+};
+
+// Para sa bawat timed exercise sa plan: ang oras ng user (kung meron), o ang panimula
+const getDurationMap = async (userId, exerciseIds) => {
+  const map = {};
+  if (!exerciseIds || exerciseIds.length === 0) return map;
+  try {
+    const r = await pool.query(
+      `SELECT e.id, e.duration_seconds AS base, ued.duration_seconds AS user_value
+       FROM exercises e
+       LEFT JOIN user_exercise_durations ued ON ued.exercise_id = e.id AND ued.user_id = $1
+       WHERE e.id = ANY($2::uuid[]) AND e.duration_seconds IS NOT NULL`,
+      [userId, exerciseIds]
+    );
+    r.rows.forEach((row) => {
+      const base = parseInt(row.base, 10);
+      const own = row.user_value !== null && row.user_value !== undefined ? parseInt(row.user_value, 10) : base;
+      map[row.id] = clampDuration(own, base);
+    });
+  } catch (err) {
+    console.error('Timed exercise lookup skipped:', err.message);
+  }
+  return map;
+};
+
+// Tumatakbo isang beses sa simula ng bagong linggo (kasama ng applyProgressiveOverload).
+// Tinitingnan ang nakaraang linggo: ilang beses lumabas ang timed exercise at ilan ang natapos.
+const applyDurationProgression = async (userId) => {
+  try {
+    const { monday } = getCurrentWeekMonday();
+    const prevMonday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() - 7);
+    const prevWeekStart = formatLocalDate(prevMonday);
+
+    const r = await pool.query(
+      `SELECT wp.exercise_id,
+              e.duration_seconds AS base,
+              ued.duration_seconds AS user_value,
+              COUNT(*) AS total,
+              SUM(CASE WHEN wp.done = true THEN 1 ELSE 0 END) AS completed
+       FROM workout_plans wp
+       JOIN exercises e ON e.id = wp.exercise_id
+       LEFT JOIN user_exercise_durations ued ON ued.exercise_id = wp.exercise_id AND ued.user_id = wp.user_id
+       WHERE wp.user_id = $1 AND wp.week_start = $2
+         AND COALESCE(wp.is_custom, false) = false
+         AND e.duration_seconds IS NOT NULL
+       GROUP BY wp.exercise_id, e.duration_seconds, ued.duration_seconds`,
+      [userId, prevWeekStart]
+    );
+
+    for (const row of r.rows) {
+      const base = parseInt(row.base, 10);
+      const current = row.user_value !== null && row.user_value !== undefined ? parseInt(row.user_value, 10) : base;
+      const total = parseInt(row.total, 10) || 0;
+      const completed = parseInt(row.completed, 10) || 0;
+      if (total === 0) continue;
+
+      const rate = completed / total;
+      let next = current;
+      if (rate >= DURATION_UP_THRESHOLD) next = current + DURATION_STEP;
+      else if (rate < DURATION_DOWN_THRESHOLD) next = current - DURATION_STEP;
+      next = clampDuration(next, base);
+      if (next === current && row.user_value !== null && row.user_value !== undefined) continue;
+
+      await pool.query(
+        `INSERT INTO user_exercise_durations (user_id, exercise_id, duration_seconds, updated_at)
+         VALUES ($1, $2, $3, now())
+         ON CONFLICT (user_id, exercise_id)
+         DO UPDATE SET duration_seconds = excluded.duration_seconds, updated_at = now()`,
+        [userId, row.exercise_id, next]
+      );
+      console.log(`Duration progression user ${userId} exercise ${row.exercise_id}: ${current}s -> ${next}s (completion ${(rate * 100).toFixed(0)}%)`);
+    }
+  } catch (err) {
+    console.error('Duration progression skipped:', err.message);
+  }
+};
+
+// ============================================
 // SHARED: Generate + Save Workout Plan (ginagamit ng generateWorkoutPlan endpoint
 // AT ng auto-regeneration logic sa loob ng getMyWorkoutPlan)
 // ============================================
@@ -167,6 +264,14 @@ const generateAndSaveWorkoutPlan = async (userId, mode, experienceLevel, _availa
     );
   }
 
+  // Alamin kung alin sa mga exercise ng plan ang timed, at ang oras ng user para doon
+  const planExerciseIds = [];
+  for (const d of workout_plan) {
+    if (d.is_rest) continue;
+    for (const ex of d.exercises || []) planExerciseIds.push(ex.id);
+  }
+  const durationMap = await getDurationMap(userId, [...new Set(planExerciseIds)]);
+
   // Save new workout plan
   for (const day of workout_plan) {
     if (day.is_rest) continue;
@@ -174,11 +279,13 @@ const generateAndSaveWorkoutPlan = async (userId, mode, experienceLevel, _availa
 
     for (const exercise of day.exercises) {
       if (keepProgress && keptKeys.has(`${day.day}|${exercise.id}`)) continue;
+      // Timed exercise: oras ("30 sec") ang ilalagay sa halip na reps
+      const repsValue = durationMap[exercise.id] ? `${durationMap[exercise.id]} sec` : exercise.reps;
       await pool.query(
         `INSERT INTO workout_plans (
           user_id, exercise_id, day, week_start, sets, reps, done
         ) VALUES ($1, $2, $3, $4, $5, $6, false)`,
-        [userId, exercise.id, day.day, weekStart, exercise.sets, exercise.reps]
+        [userId, exercise.id, day.day, weekStart, exercise.sets, repsValue]
       );
     }
   }
@@ -248,22 +355,37 @@ const getExerciseById = async (req, res) => {
   }
 };
 
+// Binabasa ang duration_seconds mula sa admin form
+const parseDuration = (v) => {
+  if (v === undefined) return { provided: false };
+  if (v === null || v === '') return { provided: true, value: null };
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n) || n < 5 || n > 600) return { error: true };
+  return { provided: true, value: n };
+};
+
 // ============================================
 // CREATE EXERCISE (Admin)
 // ============================================
 const createExercise = async (req, res) => {
   try {
-    const { name, muscle_group, equipment, difficulty, instructions, video_url, image_url } = req.body;
+    const { name, muscle_group, equipment, difficulty, instructions, video_url, image_url, duration_seconds } = req.body;
 
     if (!name || !muscle_group || !difficulty) {
       return res.status(400).json({ error: 'Name, muscle group, and difficulty are required.' });
     }
 
+    // Opsyonal: kapag may oras, timed exercise ito (5 hanggang 600 segundo)
+    const dur = parseDuration(duration_seconds);
+    if (dur.error) {
+      return res.status(400).json({ error: 'Timed exercise must be between 5 and 600 seconds.' });
+    }
+
     const result = await pool.query(
-      `INSERT INTO exercises (name, muscle_group, equipment, difficulty, instructions, video_url, image_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO exercises (name, muscle_group, equipment, difficulty, instructions, video_url, image_url, duration_seconds)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
-      [name, muscle_group, equipment || 'Bodyweight', difficulty, instructions || '', video_url || null, image_url || null]
+      [name, muscle_group, equipment || 'Bodyweight', difficulty, instructions || '', video_url || null, image_url || null, dur.provided ? dur.value : null]
     );
 
     res.status(201).json({ success: true, message: 'Exercise created successfully.', exercise: result.rows[0] });
@@ -280,7 +402,13 @@ const createExercise = async (req, res) => {
 const updateExercise = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, muscle_group, equipment, difficulty, instructions, video_url, image_url, is_active } = req.body;
+    const { name, muscle_group, equipment, difficulty, instructions, video_url, image_url, is_active, duration_seconds } = req.body;
+
+    // duration_seconds: wala sa request = walang pagbabago; null = gawing reps-based; numero = timed
+    const dur = parseDuration(duration_seconds);
+    if (dur.error) {
+      return res.status(400).json({ error: 'Timed exercise must be between 5 and 600 seconds.' });
+    }
 
     const result = await pool.query(
       `UPDATE exercises SET
@@ -292,10 +420,12 @@ const updateExercise = async (req, res) => {
         video_url = COALESCE($6, video_url),
         image_url = COALESCE($7, image_url),
         is_active = COALESCE($8, is_active),
+        duration_seconds = CASE WHEN $10::bool THEN $11::int ELSE duration_seconds END,
         updated_at = now()
       WHERE id = $9
       RETURNING *`,
-      [name, muscle_group, equipment, difficulty, instructions, video_url, image_url, is_active, id]
+      [name, muscle_group, equipment, difficulty, instructions, video_url, image_url, is_active, id,
+       dur.provided, dur.provided ? dur.value : null]
     );
 
     if (result.rows.length === 0) {
@@ -409,6 +539,7 @@ const getMyWorkoutPlan = async (req, res) => {
         // Sinusuri muna ang progressive overload (level up/down) bago mag-regenerate,
         // para ang BAGONG linggo ay gamitin na agad ang na-adjust na experience level
         const adjustedLevel = await applyProgressiveOverload(userId);
+        await applyDurationProgression(userId); // oras ng timed exercises, bawat user
         await generateAndSaveWorkoutPlan(userId, 'weekly', adjustedLevel, ['Bodyweight', 'Dumbbell']);
       } catch (genErr) {
         console.error('Auto-regeneration (workout) error:', genErr.message);
